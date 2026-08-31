@@ -17,7 +17,18 @@
 
 ## Commands
 
-The repository has not been initialized, so no setup, development, test, lint, format, build, migration, seed, or deployment command is verified yet. Seat A establishes application commands and Seat C establishes database commands in Phase 0. Replace this paragraph with verified commands only after running them successfully; record the milestone in `Memory.md`.
+Verified with Node.js 22.22.2 and npm 10.9.7 on 2026-08-31:
+
+- `npm install` - install the locked application dependencies; completed with zero audit vulnerabilities.
+- `npm run dev` - start the Next.js development server; `/` returned HTTP 200.
+- `npm run format:check` - check formatting for Seat A foundation paths.
+- `npm run lint` - run the Next.js ESLint rules.
+- `npm run typecheck` - run strict TypeScript validation without emitting files.
+- `npm test` - run Vitest once; 7 route-access tests passed.
+- `npm run build` - produce the optimized Next.js build; `/`, `/login`, and `/dashboard` were statically generated.
+- `npm start` - serve the production build; `/`, `/login`, and `/dashboard` returned HTTP 200.
+
+The hosted deployment command is not verified because Vercel authorization is unavailable in this workspace. The production-build/start fallback is verified and documented in `README.md`. Database migration and seed commands remain owned by Seat C and are not yet established.
 
 ## Engineering conventions
 
