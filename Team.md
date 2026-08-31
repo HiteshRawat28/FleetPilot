@@ -5,7 +5,7 @@
 ## Coordination source
 
 - Live board: `Team.md` until the team adopts an external tracker.
-- Update owner: Seat A (human handle currently Unassigned).
+- Update owner: Seat A (Amartya).
 - Rule: only the update owner edits live assignments/status on the shared branch. If a tracker is adopted, add its link here and stop duplicating status.
 
 ## Team seats
@@ -14,9 +14,9 @@ Seats describe path ownership, not invented identities or expertise. Replace onl
 
 | Seat | Handle | Best fit | Availability/constraint |
 |---|---|---|---|
-| Seat A - App/Integration | Unassigned | Frontend integration, auth shell, accessible components, deployment, E2E | Unassigned |
-| Seat B - Operations | Unassigned | Vehicle/driver/trip/maintenance feature implementation and rule UX | Unassigned |
-| Seat C - Data/Insights | Unassigned | PostgreSQL, RLS/RPCs, shared contracts, finance, dashboard, calculations | Unassigned |
+| Seat A - App/Integration | Amartya | Frontend integration, auth shell, accessible components, deployment, E2E | Not stated |
+| Seat B - Operations | Sanket | Vehicle/driver/trip/maintenance feature implementation and rule UX | Not stated |
+| Seat C - Data/Insights | Hitesh | PostgreSQL, RLS/RPCs, shared contracts, finance, dashboard, calculations | Not stated |
 
 ## Exclusive path ownership
 
@@ -37,10 +37,10 @@ Statuses: `Ready`, `Active`, `Blocked`, `In review`, `Done`.
 
 | ID | Outcome / requirement | Owner seat | Human owner | Reviewer | Status | Depends on | Branch/worktree | Owned paths or contract |
 |---|---|---|---|---|---|---|---|---|
-| P0-A1 | Runnable app shell and verified commands | A | Unassigned | B | Ready | Team seat mapping | `seat-a/foundation` | Root config, `src/app/**`, `src/components/**`, `src/lib/auth/**` |
-| P0-B1 | Operations feature contracts/mocks | B | Unassigned | C | Ready | P0-C1 draft contracts | `seat-b/operations` | Seat B feature paths only |
-| P0-C1 | Schema, RLS/RPC contracts, seed outline | C | Unassigned | A | Ready | Team seat mapping | `seat-c/data` | `supabase/**`, `src/contracts/**`, `src/lib/db/**` |
-| P0-ALL | Freeze stack, roles, formulas, contracts, paths | A coordinates | All three | All three | Blocked | Real people mapped to seats | Shared session | Decisions only; update owner writes planning changes |
+| P0-A1 | Runnable app shell and verified commands | A | Amartya | B | In review | Team seat mapping | `seat-a/foundation` | Root config, `src/app/**`, `src/components/**`, `src/lib/auth/**` |
+| P0-B1 | Operations feature contracts/mocks | B | Sanket | C | Ready | P0-C1 draft contracts | `seat-b/operations` | Seat B feature paths only |
+| P0-C1 | Schema, RLS/RPC contracts, seed outline | C | Hitesh | A | Ready | Team seat mapping | `seat-c/data` | `supabase/**`, `src/contracts/**`, `src/lib/db/**` |
+| P0-ALL | Freeze stack, roles, formulas, contracts, paths | A coordinates | All three | All three | Ready | Real people mapped to seats | Shared session | Decisions only; update owner writes planning changes |
 
 ## Parallel execution map
 
@@ -80,10 +80,10 @@ Seat C is the sole schema/contract writer. Seat A and B review before freeze. Af
 
 ## Current integration
 
-- Integration owner: Seat A (human Unassigned).
+- Integration owner: Seat A (Amartya).
 - Target: Phase 0 contract freeze.
 - Merge order: P0-C1 -> P0-A1 -> P0-B1.
-- Full validation: Not established because the repository is not initialized.
+- Full validation: Seat A application commands are verified; Seat C database commands remain pending P0-C1.
 
 ## Handoff contract
 
@@ -97,7 +97,6 @@ Every completed item reports:
 
 ## Coordination blockers
 
-- **TEAM-001:** real names/handles, strengths, and availability are unknown. Map all three people to seats before starting P0 tasks.
 - **DEC-001:** proposed stack, Trip Operator label, role matrix, `region`, `revenue`, and calculation definitions await the Phase 0 freeze. They are safe defaults, not permission to drift during implementation.
 
 ## Codex subagent boundary

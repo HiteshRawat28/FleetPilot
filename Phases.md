@@ -25,7 +25,7 @@ Seat assignments refer to `Team.md`; real names must be mapped before coding beg
 
 ### Parallel work
 
-- [ ] **P0-A1 (Seat A):** Initialize the Next.js/TypeScript application, protected/public route skeletons, root commands, environment example, and first deployment. Own root config and `src/app/**`.
+- [x] **P0-A1 (Seat A):** Initialize the Next.js/TypeScript application, protected/public route skeletons, root commands, environment example, and first deployment. Own root config and `src/app/**`. Implementation complete with the documented, verified local production fallback; hosted Vercel deployment awaits workspace authorization.
 - [ ] **P0-B1 (Seat B):** Turn the approved contracts into feature-local interfaces/mocks for fleet, drivers, trips, and maintenance without editing shared contract files.
 - [ ] **P0-C1 (Seat C):** Define Supabase schema, enums, normalized fields, RPC signatures, error codes, seed outline, and generated/shared contract types. Solely own `supabase/**` and `src/contracts/**`.
 - [ ] **P0-ALL:** Map real teammates to seats; confirm role label, role matrix, stack, formulas, `region`, `revenue`, and repository path ownership.
