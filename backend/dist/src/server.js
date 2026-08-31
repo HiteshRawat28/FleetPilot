@@ -14,7 +14,8 @@ const db = new client_1.PrismaClient();
 const app = (0, express_1.default)();
 const PORT = Number(process.env.PORT || 4000);
 const SECRET = process.env.JWT_SECRET || 'development-only-change-me';
-app.use((0, cors_1.default)({ origin: process.env.FRONTEND_URL?.split(',') || ['http://localhost:5173'], credentials: true }));
+const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173').split(',').map(origin => origin.trim());
+app.use((0, cors_1.default)({ origin: (origin, callback) => !origin || allowedOrigins.includes(origin) ? callback(null, true) : callback(new Error('Origin is not allowed by CORS')), credentials: true }));
 app.use(express_1.default.json());
 const asyncRoute = (fn) => (req, res, next) => { Promise.resolve(fn(req, res, next)).catch(next); };
 const authenticate = asyncRoute(async (req, res, next) => {

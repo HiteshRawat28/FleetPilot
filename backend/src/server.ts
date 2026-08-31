@@ -10,7 +10,8 @@ const db = new PrismaClient();
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
 const SECRET = process.env.JWT_SECRET || 'development-only-change-me';
-app.use(cors({ origin: process.env.FRONTEND_URL?.split(',') || ['http://localhost:5173'], credentials: true }));
+const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173').split(',').map(origin => origin.trim());
+app.use(cors({ origin: (origin,callback) => !origin || allowedOrigins.includes(origin) ? callback(null,true) : callback(new Error('Origin is not allowed by CORS')), credentials: true }));
 app.use(express.json());
 
 type Session = { id:string; name:string; email:string; role:Role };
