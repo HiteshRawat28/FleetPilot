@@ -60,6 +60,7 @@ model User {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   isActive Boolean @default(true)
   lastLoginAt DateTime?
+  lastActiveAt DateTime?
   createdAt DateTime @default(now())
 
   @@index([organizationId])
