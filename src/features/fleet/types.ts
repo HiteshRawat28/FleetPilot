@@ -1,6 +1,11 @@
+import type {
+  DomainErrorCode,
+  VehicleStatus as SharedVehicleStatus,
+} from "../../contracts";
+
 export type ISODateTimeString = string;
 
-export type VehicleStatus = "available" | "on_trip" | "in_shop" | "retired";
+export type VehicleStatus = SharedVehicleStatus;
 
 export type VehicleType = "van" | "box_truck" | "flatbed" | "reefer" | "other";
 
@@ -41,13 +46,15 @@ export interface VehicleFilters {
   region?: string;
 }
 
-export type VehicleErrorCode =
+export type VehicleErrorCode = Extract<
+  DomainErrorCode,
   | "VEHICLE_NOT_FOUND"
   | "VEHICLE_ARCHIVED"
   | "DUPLICATE_REGISTRATION"
   | "INVALID_VEHICLE_FIELD"
   | "VEHICLE_ACTIVE_OPERATION"
-  | "INVALID_VEHICLE_STATUS";
+  | "INVALID_VEHICLE_STATUS"
+>;
 
 export interface VehicleDomainError {
   code: VehicleErrorCode;
@@ -57,8 +64,7 @@ export interface VehicleDomainError {
 }
 
 export type VehicleResult<T> =
-  | { ok: true; data: T }
-  | { ok: false; error: VehicleDomainError };
+  { ok: true; data: T } | { ok: false; error: VehicleDomainError };
 
 export interface MockVehicleSeed {
   id?: string;

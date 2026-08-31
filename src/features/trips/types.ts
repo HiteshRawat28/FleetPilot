@@ -1,9 +1,13 @@
+import type {
+  DomainErrorCode,
+  TripStatus as SharedTripStatus,
+} from "../../contracts";
 import type { DriverRecord, ISODateString } from "../drivers";
 import type { VehicleRecord } from "../fleet";
 
 export type ISODateTimeString = string;
 
-export type TripStatus = "draft" | "dispatched" | "completed" | "cancelled";
+export type TripStatus = SharedTripStatus;
 
 export interface DraftTripInput {
   source: string;
@@ -36,7 +40,8 @@ export interface TripRecord extends DraftTripInput {
   createdBy: string | null;
 }
 
-export type TripOperationErrorCode =
+export type TripOperationErrorCode = Extract<
+  DomainErrorCode,
   | "TRIP_NOT_FOUND"
   | "INVALID_TRIP_FIELD"
   | "INVALID_TRIP_TRANSITION"
@@ -54,9 +59,11 @@ export type TripOperationErrorCode =
   | "DRIVER_LICENSE_EXPIRED"
   | "RESOURCE_ALREADY_ASSIGNED"
   | "FINAL_ODOMETER_TOO_LOW"
-  | "INVALID_FUEL_FIELD";
+  | "INVALID_FUEL_FIELD"
+>;
 
-export type TripField = keyof DraftTripInput | "finalOdometerKm" | "fuelLiters" | "fuelCost";
+export type TripField =
+  keyof DraftTripInput | "finalOdometerKm" | "fuelLiters" | "fuelCost";
 
 export interface DispatchBlocker {
   resourceKind: "vehicle" | "driver" | "trip";
@@ -82,8 +89,7 @@ export interface TripOperationError {
 }
 
 export type TripResult<T> =
-  | { ok: true; data: T }
-  | { ok: false; error: TripOperationError };
+  { ok: true; data: T } | { ok: false; error: TripOperationError };
 
 export interface MockTripSeed extends Partial<DraftTripInput> {
   id?: string;

@@ -16,7 +16,10 @@ export function normalizeRegistration(registrationNumber: string): string {
   return registrationNumber.trim().toUpperCase();
 }
 
-export function buildMockVehicle(seed: MockVehicleSeed, index = 0): VehicleRecord {
+export function buildMockVehicle(
+  seed: MockVehicleSeed,
+  index = 0,
+): VehicleRecord {
   const createdAt = seed.createdAt ?? DEFAULT_MOCK_NOW;
   const updatedAt = seed.updatedAt ?? createdAt;
   const registrationNumber = seed.registrationNumber.trim();
@@ -75,7 +78,9 @@ function validateRequiredText(
   return { ok: true, data: undefined };
 }
 
-function validateVehicleNumbers(input: UpdateVehicleInput): VehicleResult<undefined> {
+function validateVehicleNumbers(
+  input: UpdateVehicleInput,
+): VehicleResult<undefined> {
   if (input.maxLoadKg !== undefined && input.maxLoadKg <= 0) {
     return invalidField("maxLoadKg", "Maximum load must be greater than 0 kg.");
   }
@@ -85,14 +90,22 @@ function validateVehicleNumbers(input: UpdateVehicleInput): VehicleResult<undefi
   }
 
   if (input.acquisitionCost !== undefined && input.acquisitionCost < 0) {
-    return invalidField("acquisitionCost", "Acquisition cost cannot be negative.");
+    return invalidField(
+      "acquisitionCost",
+      "Acquisition cost cannot be negative.",
+    );
   }
 
   return { ok: true, data: undefined };
 }
 
-function validateCreateVehicleInput(input: CreateVehicleInput): VehicleResult<undefined> {
-  const registration = validateRequiredText("registrationNumber", input.registrationNumber);
+function validateCreateVehicleInput(
+  input: CreateVehicleInput,
+): VehicleResult<undefined> {
+  const registration = validateRequiredText(
+    "registrationNumber",
+    input.registrationNumber,
+  );
   if (!registration.ok) return registration;
 
   const nameModel = validateRequiredText("nameModel", input.nameModel);
@@ -104,8 +117,13 @@ function validateCreateVehicleInput(input: CreateVehicleInput): VehicleResult<un
   return validateVehicleNumbers(input);
 }
 
-function validateUpdateVehicleInput(input: UpdateVehicleInput): VehicleResult<undefined> {
-  const registration = validateRequiredText("registrationNumber", input.registrationNumber);
+function validateUpdateVehicleInput(
+  input: UpdateVehicleInput,
+): VehicleResult<undefined> {
+  const registration = validateRequiredText(
+    "registrationNumber",
+    input.registrationNumber,
+  );
   if (!registration.ok) return registration;
 
   const nameModel = validateRequiredText("nameModel", input.nameModel);
@@ -138,10 +156,21 @@ export class MockFleetStore {
     const query = filters.query?.trim().toLowerCase();
 
     return [...this.vehicles.values()]
-      .filter((vehicle) => filters.includeArchived || vehicle.archivedAt === null)
-      .filter((vehicle) => filters.status === undefined || vehicle.status === filters.status)
-      .filter((vehicle) => filters.type === undefined || vehicle.type === filters.type)
-      .filter((vehicle) => filters.region === undefined || vehicle.region === filters.region)
+      .filter(
+        (vehicle) => filters.includeArchived || vehicle.archivedAt === null,
+      )
+      .filter(
+        (vehicle) =>
+          filters.status === undefined || vehicle.status === filters.status,
+      )
+      .filter(
+        (vehicle) =>
+          filters.type === undefined || vehicle.type === filters.type,
+      )
+      .filter(
+        (vehicle) =>
+          filters.region === undefined || vehicle.region === filters.region,
+      )
       .filter((vehicle) => {
         if (!query) return true;
         return (
@@ -150,7 +179,9 @@ export class MockFleetStore {
           vehicle.region.toLowerCase().includes(query)
         );
       })
-      .sort((left, right) => left.registrationNumber.localeCompare(right.registrationNumber))
+      .sort((left, right) =>
+        left.registrationNumber.localeCompare(right.registrationNumber),
+      )
       .map(cloneVehicle);
   }
 
@@ -159,11 +190,16 @@ export class MockFleetStore {
     return vehicle ? cloneVehicle(vehicle) : undefined;
   }
 
-  createVehicle(input: CreateVehicleInput, createdBy: string | null = null): VehicleResult<VehicleRecord> {
+  createVehicle(
+    input: CreateVehicleInput,
+    createdBy: string | null = null,
+  ): VehicleResult<VehicleRecord> {
     const validation = validateCreateVehicleInput(input);
     if (!validation.ok) return validation;
 
-    const registrationNumberNormalized = normalizeRegistration(input.registrationNumber);
+    const registrationNumberNormalized = normalizeRegistration(
+      input.registrationNumber,
+    );
     if (this.hasRegistration(registrationNumberNormalized)) {
       return vehicleError({
         code: "DUPLICATE_REGISTRATION",
@@ -195,7 +231,10 @@ export class MockFleetStore {
     return { ok: true, data: cloneVehicle(vehicle) };
   }
 
-  updateVehicle(vehicleId: string, input: UpdateVehicleInput): VehicleResult<VehicleRecord> {
+  updateVehicle(
+    vehicleId: string,
+    input: UpdateVehicleInput,
+  ): VehicleResult<VehicleRecord> {
     const vehicle = this.vehicles.get(vehicleId);
     if (!vehicle) {
       return vehicleError({
@@ -209,14 +248,16 @@ export class MockFleetStore {
       return vehicleError({
         code: "VEHICLE_ARCHIVED",
         message: `${vehicle.registrationNumber} is archived and cannot be edited.`,
-        recovery: "Restore or create a new vehicle record before making changes.",
+        recovery:
+          "Restore or create a new vehicle record before making changes.",
       });
     }
 
     const validation = validateUpdateVehicleInput(input);
     if (!validation.ok) return validation;
 
-    const nextRegistration = input.registrationNumber?.trim() ?? vehicle.registrationNumber;
+    const nextRegistration =
+      input.registrationNumber?.trim() ?? vehicle.registrationNumber;
     const nextRegistrationNormalized = normalizeRegistration(nextRegistration);
     if (this.hasRegistration(nextRegistrationNormalized, vehicleId)) {
       return vehicleError({
@@ -258,11 +299,16 @@ export class MockFleetStore {
       return vehicleError({
         code: "VEHICLE_ACTIVE_OPERATION",
         message: `${vehicle.registrationNumber} is ${describeVehicleStatus(vehicle.status)} and cannot be archived.`,
-        recovery: "Complete the active trip or close maintenance before archiving.",
+        recovery:
+          "Complete the active trip or close maintenance before archiving.",
       });
     }
 
-    const updated = { ...vehicle, archivedAt: this.now(), updatedAt: this.now() };
+    const updated = {
+      ...vehicle,
+      archivedAt: this.now(),
+      updatedAt: this.now(),
+    };
     this.vehicles.set(vehicleId, updated);
     return { ok: true, data: cloneVehicle(updated) };
   }
@@ -291,7 +337,9 @@ export class MockFleetStore {
     });
   }
 
-  restoreVehicleAfterMaintenance(vehicleId: string): VehicleResult<VehicleRecord> {
+  restoreVehicleAfterMaintenance(
+    vehicleId: string,
+  ): VehicleResult<VehicleRecord> {
     const vehicle = this.vehicles.get(vehicleId);
     if (!vehicle) {
       return vehicleError({
@@ -323,7 +371,11 @@ export class MockFleetStore {
       });
     }
 
-    const updated = { ...vehicle, status: "available" as const, updatedAt: this.now() };
+    const updated = {
+      ...vehicle,
+      status: "available" as const,
+      updatedAt: this.now(),
+    };
     this.vehicles.set(vehicleId, updated);
     return { ok: true, data: cloneVehicle(updated) };
   }
@@ -350,16 +402,24 @@ export class MockFleetStore {
       return vehicleError({
         code: "VEHICLE_ACTIVE_OPERATION",
         message: `${vehicle.registrationNumber} is On Trip and cannot be retired.`,
-        recovery: "Complete or cancel the active trip before retiring the vehicle.",
+        recovery:
+          "Complete or cancel the active trip before retiring the vehicle.",
       });
     }
 
-    const updated = { ...vehicle, status: "retired" as const, updatedAt: this.now() };
+    const updated = {
+      ...vehicle,
+      status: "retired" as const,
+      updatedAt: this.now(),
+    };
     this.vehicles.set(vehicleId, updated);
     return { ok: true, data: cloneVehicle(updated) };
   }
 
-  private hasRegistration(registrationNumberNormalized: string, exceptVehicleId?: string): boolean {
+  private hasRegistration(
+    registrationNumberNormalized: string,
+    exceptVehicleId?: string,
+  ): boolean {
     return [...this.vehicles.values()].some(
       (vehicle) =>
         vehicle.id !== exceptVehicleId &&
