@@ -30,6 +30,12 @@ enum DriverStatus {
   SUSPENDED
 }
 
+enum LicenseCategory {
+  LMV
+  HMV
+  MCWG
+}
+
 enum TripStatus {
   DRAFT
   DISPATCHED
@@ -89,6 +95,7 @@ model Vehicle {
   name String
   type String
   capacityKg Float
+  requiredLicenseCategory LicenseCategory @default(LMV)
   odometerKm Float @default(0)
   acquisitionCost Float
   status VehicleStatus @default(AVAILABLE)

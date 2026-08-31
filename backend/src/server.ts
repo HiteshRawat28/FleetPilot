@@ -3,9 +3,10 @@ import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { Prisma, PrismaClient, Role, TripStatus, VehicleStatus, DriverStatus, MaintenanceStatus } from '@prisma/client';
+import { Prisma, PrismaClient, Role, TripStatus, VehicleStatus, DriverStatus, MaintenanceStatus, LicenseCategory } from '@prisma/client';
 import { z } from 'zod';
 import { OAuth2Client } from 'google-auth-library';
+import { assertAssignmentEligible, AssignmentEligibilityError } from './services/assignmentEligibility';
 
 const db = new PrismaClient();
 const app = express();
@@ -90,7 +91,7 @@ app.get('/api/dashboard',asyncRoute(async(req,res)=>{
   res.json({kpis:{activeVehicles:active,availableVehicles:vc.AVAILABLE||0,inMaintenance:vc.IN_SHOP||0,activeTrips:tc.DISPATCHED||0,pendingTrips:tc.DRAFT||0,driversOnDuty:dc.ON_TRIP||0,fleetUtilization:active?Math.round(utilized/active*100):0},vehicleStatus:vc,recentTrips});
 }));
 
-const vehicleSchema=z.object({registrationNo:z.string().min(3),name:z.string().min(2),type:z.string().min(2),capacityKg:z.coerce.number().positive(),odometerKm:z.coerce.number().nonnegative(),acquisitionCost:z.coerce.number().nonnegative(),status:z.enum(VehicleStatus).default(VehicleStatus.AVAILABLE),region:z.string().default('Central')});
+const vehicleSchema=z.object({registrationNo:z.string().min(3),name:z.string().min(2),type:z.string().min(2),capacityKg:z.coerce.number().positive(),requiredLicenseCategory:z.enum(LicenseCategory),odometerKm:z.coerce.number().nonnegative(),acquisitionCost:z.coerce.number().nonnegative(),status:z.enum(VehicleStatus).default(VehicleStatus.AVAILABLE),region:z.string().default('Central')});
 app.get('/api/vehicles',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
   const q=String(req.query.q||''); const status=req.query.status as VehicleStatus|undefined; const type=String(req.query.type||'');
   res.json(await db.vehicle.findMany({where:{AND:[{organizationId:req.user!.organizationId},q?{OR:[{registrationNo:{contains:q,mode:'insensitive'}},{name:{contains:q,mode:'insensitive'}}]}:{},status?{status}:{},type?{type}:{ }]},orderBy:{createdAt:'desc'}}));
@@ -100,7 +101,7 @@ app.post('/api/vehicles',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>re
 app.put('/api/vehicles/:id',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const row=await db.vehicle.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!row)throw Object.assign(new Error('Vehicle not found'),{status:404});res.json(await db.vehicle.update({where:{id:row.id},data:parse(vehicleSchema.partial(),req.body)}))}));
 app.delete('/api/vehicles/:id',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const row=await db.vehicle.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!row)throw Object.assign(new Error('Vehicle not found'),{status:404});await db.vehicle.delete({where:{id:row.id}});res.status(204).end();}));
 
-const driverSchema=z.object({name:z.string().min(2),licenseNo:z.string().min(3),licenseCategory:z.string().min(2),licenseExpiry:z.coerce.date(),contact:z.string().min(7),safetyScore:z.coerce.number().int().min(0).max(100),status:z.enum(DriverStatus).default(DriverStatus.AVAILABLE)});
+const driverSchema=z.object({name:z.string().min(2),licenseNo:z.string().min(3),licenseCategory:z.enum(LicenseCategory),licenseExpiry:z.coerce.date(),contact:z.string().min(7),safetyScore:z.coerce.number().int().min(0).max(100),status:z.enum(DriverStatus).default(DriverStatus.AVAILABLE)});
 app.get('/api/drivers',allow(Role.FLEET_MANAGER,Role.SAFETY_OFFICER),asyncRoute(async(req,res)=>{const q=String(req.query.q||'');res.json(await db.driver.findMany({where:{organizationId:req.user!.organizationId,...(q?{OR:[{name:{contains:q,mode:'insensitive'}},{licenseNo:{contains:q,mode:'insensitive'}}]}:{})},orderBy:{createdAt:'desc'}}));}));
 app.get('/api/drivers/available',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>res.json(await db.driver.findMany({where:{organizationId:req.user!.organizationId,status:DriverStatus.AVAILABLE,licenseExpiry:{gt:new Date()}},orderBy:{name:'asc'}}))));
 app.post('/api/drivers',allow(Role.FLEET_MANAGER,Role.SAFETY_OFFICER),asyncRoute(async(req,res)=>res.status(201).json(await db.driver.create({data:{...parse(driverSchema,req.body),organizationId:req.user!.organizationId}}))));
@@ -109,20 +110,42 @@ app.delete('/api/drivers/:id',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res
 
 const tripSchema=z.object({source:z.string().min(2),destination:z.string().min(2),vehicleId:z.string(),driverId:z.string(),cargoWeightKg:z.coerce.number().positive(),plannedDistanceKm:z.coerce.number().positive(),revenue:z.coerce.number().nonnegative().default(0)});
 app.get('/api/trips',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>res.json(await db.trip.findMany({where:{organizationId:req.user!.organizationId},include:{vehicle:true,driver:true},orderBy:{createdAt:'desc'}}))));
+
+async function getAssignmentContext(organizationId:string,vehicleId:string,driverId:string){
+  const [vehicle,driver,vehicleTrip,driverTrip,maintenance]=await Promise.all([
+    db.vehicle.findFirst({where:{id:vehicleId,organizationId}}),
+    db.driver.findFirst({where:{id:driverId,organizationId}}),
+    db.trip.findFirst({where:{organizationId,vehicleId,status:TripStatus.DISPATCHED},select:{tripNo:true}}),
+    db.trip.findFirst({where:{organizationId,driverId,status:TripStatus.DISPATCHED},select:{tripNo:true}}),
+    db.maintenance.findFirst({where:{organizationId,vehicleId,status:MaintenanceStatus.ACTIVE},select:{serviceType:true}})
+  ]);
+  return {vehicle,driver,vehicleTripNo:vehicleTrip?.tripNo,driverTripNo:driverTrip?.tripNo,maintenanceService:maintenance?.serviceType};
+}
+
+app.post('/api/trips/validate-assignment',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
+  const data=parse(tripSchema.pick({vehicleId:true,driverId:true,cargoWeightKg:true}),req.body);
+  const context=await getAssignmentContext(req.user!.organizationId,data.vehicleId,data.driverId);
+  try { assertAssignmentEligible({...context,cargoWeightKg:data.cargoWeightKg}); res.json({eligible:true,reasons:[]}); }
+  catch(error) { if(error instanceof AssignmentEligibilityError)return res.json({eligible:false,reasons:error.reasons}); throw error; }
+}));
+
 app.post('/api/trips',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const data=parse(tripSchema,req.body); const [v,d]=await Promise.all([db.vehicle.findFirst({where:{id:data.vehicleId,organizationId:req.user!.organizationId}}),db.driver.findFirst({where:{id:data.driverId,organizationId:req.user!.organizationId}})]);
-  if(!v||!d) throw Object.assign(new Error('Vehicle or driver not found'),{status:404});
-  if(v.status!==VehicleStatus.AVAILABLE) throw Object.assign(new Error('Selected vehicle is not available'),{status:409});
-  if(d.status!==DriverStatus.AVAILABLE||d.licenseExpiry<=new Date()) throw Object.assign(new Error('Driver is unavailable, suspended, or license has expired'),{status:409});
-  if(data.cargoWeightKg>v.capacityKg) throw Object.assign(new Error(`Cargo exceeds ${v.capacityKg} kg vehicle capacity`),{status:400});
+  const data=parse(tripSchema,req.body);
+  const context=await getAssignmentContext(req.user!.organizationId,data.vehicleId,data.driverId);
+  assertAssignmentEligible({...context,cargoWeightKg:data.cargoWeightKg});
   const tripNo=`TRP${String((await db.trip.count({where:{organizationId:req.user!.organizationId}}))+1).padStart(4,'0')}`;
   res.status(201).json(await db.trip.create({data:{...data,tripNo,organizationId:req.user!.organizationId},include:{vehicle:true,driver:true}}));
 }));
 app.post('/api/trips/:id/dispatch',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId},include:{vehicle:true,driver:true}}); if(!trip) throw Object.assign(new Error('Trip not found'),{status:404});
-  if(trip.status!==TripStatus.DRAFT) throw Object.assign(new Error('Only draft trips can be dispatched'),{status:409});
-  if(trip.vehicle.status!==VehicleStatus.AVAILABLE||trip.driver.status!==DriverStatus.AVAILABLE||trip.driver.licenseExpiry<=new Date()) throw Object.assign(new Error('Vehicle or driver is no longer eligible'),{status:409});
-  const result=await db.$transaction(async tx=>{await tx.vehicle.update({where:{id:trip.vehicleId},data:{status:VehicleStatus.ON_TRIP}});await tx.driver.update({where:{id:trip.driverId},data:{status:DriverStatus.ON_TRIP}});return tx.trip.update({where:{id:trip.id},data:{status:TripStatus.DISPATCHED,dispatchedAt:new Date()},include:{vehicle:true,driver:true}})}); res.json(result);
+  const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}}); if(!trip) throw Object.assign(new Error('Trip not found'),{status:404});
+  const context=await getAssignmentContext(req.user!.organizationId,trip.vehicleId,trip.driverId);
+  assertAssignmentEligible({...context,cargoWeightKg:trip.cargoWeightKg,tripStatus:trip.status});
+  const result=await db.$transaction(async tx=>{
+    const vehicle=await tx.vehicle.updateMany({where:{id:trip.vehicleId,organizationId:req.user!.organizationId,status:VehicleStatus.AVAILABLE},data:{status:VehicleStatus.ON_TRIP}});
+    const driver=await tx.driver.updateMany({where:{id:trip.driverId,organizationId:req.user!.organizationId,status:DriverStatus.AVAILABLE,licenseExpiry:{gt:new Date()}},data:{status:DriverStatus.ON_TRIP}});
+    if(vehicle.count!==1||driver.count!==1)throw new AssignmentEligibilityError([{code:vehicle.count!==1?'VEHICLE_ON_TRIP':'DRIVER_ON_TRIP',field:vehicle.count!==1?'vehicleId':'driverId',message:'Assignment availability changed while dispatching. Review the latest vehicle and driver status, then try again.'}]);
+    return tx.trip.update({where:{id:trip.id},data:{status:TripStatus.DISPATCHED,dispatchedAt:new Date()},include:{vehicle:true,driver:true}})
+  },{isolationLevel:Prisma.TransactionIsolationLevel.Serializable}); res.json(result);
 }));
 app.post('/api/trips/:id/complete',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
   const {finalOdometerKm,fuelConsumedL}=parse(z.object({finalOdometerKm:z.coerce.number().positive(),fuelConsumedL:z.coerce.number().positive()}),req.body); const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}}); if(!trip||trip.status!==TripStatus.DISPATCHED) throw Object.assign(new Error('Only dispatched trips can be completed'),{status:409});
@@ -148,6 +171,6 @@ async function analytics(organizationId:string){
 app.get('/api/analytics',allow(),asyncRoute(async(req,res)=>res.json(await analytics(req.user!.organizationId))));
 app.get('/api/analytics/export.csv',asyncRoute(async(req,res)=>{const a=await analytics(req.user!.organizationId);const csv=['Vehicle,Registration,Operational Cost,ROI %',...a.byVehicle.map(x=>`"${x.name}","${x.registrationNo}",${x.operationalCost.toFixed(2)},${x.roi.toFixed(2)}`)].join('\n');res.type('text/csv').attachment('fleetpilot-analytics.csv').send(csv);}));
 
-app.use((err:any,_req:Request,res:Response,_next:NextFunction)=>{console.error(err);if(err instanceof Prisma.PrismaClientKnownRequestError){if(err.code==='P2002')return res.status(409).json({message:'A record with this unique value already exists'});if(err.code==='P2022')return res.status(503).json({message:'Database setup is incomplete. Please run the latest FleetPilot migration.'});return res.status(500).json({message:'The database could not complete this request'});}if(err instanceof Prisma.PrismaClientValidationError)return res.status(400).json({message:'The request contains invalid data'});res.status(err.status||500).json({message:err.status?err.message:'Something went wrong. Please try again.'});});
+app.use((err:any,_req:Request,res:Response,_next:NextFunction)=>{console.error(err);if(err instanceof AssignmentEligibilityError)return res.status(err.status).json({code:err.code,message:err.message,reasons:err.reasons});if(err instanceof Prisma.PrismaClientKnownRequestError){if(err.code==='P2002')return res.status(409).json({message:'A record with this unique value already exists'});if(err.code==='P2022')return res.status(503).json({message:'Database setup is incomplete. Please run the latest FleetPilot migration.'});return res.status(500).json({message:'The database could not complete this request'});}if(err instanceof Prisma.PrismaClientValidationError)return res.status(400).json({message:'The request contains invalid data'});res.status(err.status||500).json({message:err.status?err.message:'Something went wrong. Please try again.'});});
 app.listen(PORT,()=>console.log(`TransitOps API running at http://localhost:${PORT}`));
 process.on('SIGTERM',async()=>{await db.$disconnect();process.exit(0)});
