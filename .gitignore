@@ -1,12 +1,12 @@
 # dependencies
-/node_modules
+node_modules
 
 # Next.js
-/.next/
-/out/
+.next/
+out/
 
 # tests
-/coverage/
+coverage/
 
 # local environment files
 .env*
