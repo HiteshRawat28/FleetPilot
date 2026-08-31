@@ -33,8 +33,8 @@ function Login({onLogin}:{onLogin:(u:User)=>void}){
     gsap.fromTo('.phone-shell',{rotate:-10,y:130},{rotate:3,y:0,ease:'none',scrollTrigger:{trigger:'.mobile-app-section',start:'top bottom',end:'65% center',scrub:1}});
     gsap.to('.app-float-card',{yPercent:-45,stagger:.15,ease:'none',scrollTrigger:{trigger:'.mobile-app-section',start:'top bottom',end:'bottom top',scrub:1}});
     const desktop=gsap.matchMedia();desktop.add('(min-width: 1001px)',()=>{
-      const track=document.querySelector<HTMLElement>('.modules-track');if(track){const distance=()=>Math.max(0,track.scrollWidth-window.innerWidth+window.innerWidth*.12);gsap.to(track,{x:()=>-distance(),ease:'none',scrollTrigger:{trigger:'.modules-section',start:'top top',end:()=>`+=${distance()+1100}`,scrub:1,pin:true,invalidateOnRefresh:true}})}
-      gsap.timeline({scrollTrigger:{trigger:'.control-section',start:'top top',end:'+=1100',scrub:1,pin:true}}).fromTo('.dashboard-showcase',{clipPath:'circle(7% at 63% 50%)',scale:.72},{clipPath:'circle(100% at 50% 50%)',scale:1,ease:'none'}).to('.control-copy',{xPercent:-18,opacity:.2,ease:'none'},'<');
+      const track=document.querySelector<HTMLElement>('.modules-track');if(track){const distance=()=>Math.max(0,track.scrollWidth-window.innerWidth+window.innerWidth*.12);gsap.to(track,{x:()=>-distance(),ease:'none',scrollTrigger:{trigger:'.modules-section',start:'top top',end:()=>`+=${distance()+240}`,scrub:1,pin:true,anticipatePin:1,invalidateOnRefresh:true}})}
+      gsap.timeline({scrollTrigger:{trigger:'.control-section',start:'top 78%',end:'bottom 22%',scrub:1}}).fromTo('.dashboard-showcase',{clipPath:'circle(18% at 63% 50%)',scale:.82},{clipPath:'circle(100% at 50% 50%)',scale:1,ease:'none'}).fromTo('.control-copy',{xPercent:0,opacity:1},{xPercent:-7,opacity:.72,ease:'none'},'<');
     });
     return()=>desktop.revert();
   },root);return()=>ctx.revert()},[]);

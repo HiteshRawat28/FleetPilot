@@ -23,7 +23,7 @@ const asyncRoute = (fn:(req:Request,res:Response,next:NextFunction)=>Promise<unk
 const authenticate = asyncRoute(async (req,res,next) => {
   const token = req.headers.authorization?.replace(/^Bearer\s+/,'');
   if (!token) return res.status(401).json({message:'Authentication required'});
-  try { req.user = jwt.verify(token,SECRET) as Session; next(); }
+  try { const claims=jwt.verify(token,SECRET) as Session;const account=await db.user.findUnique({where:{id:claims.id},include:{organization:true}});if(!account||!account.isActive)return res.status(401).json({message:'This session no longer has access'});req.user=publicUser(account);next(); }
   catch { res.status(401).json({message:'Session expired. Please sign in again.'}); }
 });
 const elevated = [Role.OWNER,Role.ADMIN];

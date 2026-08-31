@@ -26,7 +26,11 @@ const authenticate = asyncRoute(async (req, res, next) => {
     if (!token)
         return res.status(401).json({ message: 'Authentication required' });
     try {
-        req.user = jsonwebtoken_1.default.verify(token, SECRET);
+        const claims = jsonwebtoken_1.default.verify(token, SECRET);
+        const account = await db.user.findUnique({ where: { id: claims.id }, include: { organization: true } });
+        if (!account || !account.isActive)
+            return res.status(401).json({ message: 'This session no longer has access' });
+        req.user = publicUser(account);
         next();
     }
     catch {
