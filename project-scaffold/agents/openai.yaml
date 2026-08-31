@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Scaffold"
+  short_description: "Plan projects for a four-person Codex team"
+  default_prompt: "Use $project-scaffold to plan this project for our four-person team and delegate independent analysis to subagents."
