@@ -39,6 +39,14 @@
 
 ## Milestone log
 
+### 2026-08-31 — Phase 1 read-only FleetPilot Copilot
+
+- Added an authenticated Copilot drawer with page-aware prompts, session-local conversation history, configuration/error states, and structured evidence cards.
+- Added a stateless Groq Responses API tool loop, a four-round cap, a per-user request limit, and a configurable `GROQ_MODEL` defaulting to `openai/gpt-oss-20b`.
+- Added role-specific, organization-scoped read tools for fleet status, vehicles, drivers, trips, maintenance, finance, analytics, and assignment validation.
+- Kept the model outside Prisma and all write workflows. Assignment answers reuse the centralized eligibility evaluator and Phase 1 refuses mutations.
+- Added role-matrix tests and server-only environment documentation. Browser history is intentionally local and capped; durable conversation/audit storage remains future work.
+
 ### 2026-08-31 — Exact assignment failure diagnostics
 
 - Completed centralized multi-reason eligibility checks for trip creation and dispatch.

@@ -7,6 +7,7 @@ import { Prisma, PrismaClient, Role, TripStatus, VehicleStatus, DriverStatus, Ma
 import { z } from 'zod';
 import { OAuth2Client } from 'google-auth-library';
 import { assertAssignmentEligible, AssignmentEligibilityError } from './services/assignmentEligibility';
+import { createChatRouter } from './chat/chat';
 
 const db = new PrismaClient();
 const app = express();
@@ -76,6 +77,7 @@ app.post('/api/auth/google', asyncRoute(async(req,res)=>{
 app.get('/api/auth/me',authenticate,(req,res)=>res.json({user:req.user}));
 
 app.use('/api',authenticate);
+app.use('/api/chat',createChatRouter(db));
 app.get('/api/organization',asyncRoute(async(req,res)=>res.json(await db.organization.findUnique({where:{id:req.user!.organizationId}}))));
 app.put('/api/organization',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{const data=parse(z.object({name:z.string().trim().min(2).max(100),operationsEmail:z.email().optional()}),req.body);res.json(await db.organization.update({where:{id:req.user!.organizationId},data}))}));
 app.get('/api/users',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>res.json(await db.user.findMany({where:{organizationId:req.user!.organizationId},select:{id:true,name:true,email:true,role:true,isActive:true,lastLoginAt:true,lastActiveAt:true,createdAt:true,googleSub:true},orderBy:{createdAt:'asc'}}))));
