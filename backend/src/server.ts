@@ -1,19 +1,43 @@
-import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
+import dotenv from 'dotenv';
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { Prisma, PrismaClient, Role, TripStatus, VehicleStatus, DriverStatus, MaintenanceStatus } from '@prisma/client';
+import type { Role as UserRole, VehicleStatus as VehicleStatusValue } from '@prisma/client';
 import { z } from 'zod';
 
+const envFiles = [
+  path.resolve(process.cwd(), 'backend/.env'),
+  path.resolve(process.cwd(), '.env'),
+  path.resolve(__dirname, '../.env'),
+  path.resolve(__dirname, '../../.env'),
+];
+const envFile = envFiles.find(file => fs.existsSync(file));
+if (envFile) dotenv.config({ path: envFile });
+
+const { Prisma, PrismaClient, Role, TripStatus, VehicleStatus, DriverStatus, MaintenanceStatus } =
+  require('@prisma/client') as typeof import('@prisma/client');
 const db = new PrismaClient();
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
 const SECRET = process.env.JWT_SECRET || 'development-only-change-me';
-app.use(cors({ origin: process.env.FRONTEND_URL?.split(',') || ['http://localhost:5173'], credentials: true }));
+const configuredOrigins = process.env.FRONTEND_URL?.split(',').map(origin => origin.trim()).filter(Boolean) || [];
+const localFrontendPattern = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/;
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || configuredOrigins.includes(origin) || localFrontendPattern.test(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error(`CORS origin not allowed: ${origin}`));
+  },
+  credentials: true,
+}));
 app.use(express.json());
 
-type Session = { id:string; name:string; email:string; role:Role };
+type Session = { id:string; name:string; email:string; role:UserRole };
 declare global { namespace Express { interface Request { user?: Session } } }
 const asyncRoute = (fn:(req:Request,res:Response,next:NextFunction)=>Promise<unknown>) => (req:Request,res:Response,next:NextFunction) => { Promise.resolve(fn(req,res,next)).catch(next); };
 const authenticate = asyncRoute(async (req,res,next) => {
@@ -22,7 +46,7 @@ const authenticate = asyncRoute(async (req,res,next) => {
   try { req.user = jwt.verify(token,SECRET) as Session; next(); }
   catch { res.status(401).json({message:'Session expired. Please sign in again.'}); }
 });
-const allow = (...roles:Role[]) => (req:Request,res:Response,next:NextFunction) => roles.includes(req.user!.role) ? next() : res.status(403).json({message:'You do not have permission for this action'});
+const allow = (...roles:UserRole[]) => (req:Request,res:Response,next:NextFunction) => roles.includes(req.user!.role) ? next() : res.status(403).json({message:'You do not have permission for this action'});
 const parse = <T>(schema:z.ZodType<T>, data:unknown) => { const out=schema.safeParse(data); if(!out.success) throw Object.assign(new Error(out.error.issues[0]?.message || 'Invalid request'),{status:400}); return out.data; };
 const idParam = (req:Request) => String(req.params.id);
 
@@ -49,7 +73,7 @@ app.get('/api/dashboard',asyncRoute(async(req,res)=>{
 
 const vehicleSchema=z.object({registrationNo:z.string().min(3),name:z.string().min(2),type:z.string().min(2),capacityKg:z.coerce.number().positive(),odometerKm:z.coerce.number().nonnegative(),acquisitionCost:z.coerce.number().nonnegative(),status:z.enum(VehicleStatus).default(VehicleStatus.AVAILABLE),region:z.string().default('Central')});
 app.get('/api/vehicles',asyncRoute(async(req,res)=>{
-  const q=String(req.query.q||''); const status=req.query.status as VehicleStatus|undefined; const type=String(req.query.type||'');
+  const q=String(req.query.q||''); const status=req.query.status as VehicleStatusValue|undefined; const type=String(req.query.type||'');
   res.json(await db.vehicle.findMany({where:{AND:[q?{OR:[{registrationNo:{contains:q,mode:'insensitive'}},{name:{contains:q,mode:'insensitive'}}]}:{},status?{status}:{},type?{type}:{ }]},orderBy:{createdAt:'desc'}}));
 }));
 app.get('/api/vehicles/available',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(_req,res)=>res.json(await db.vehicle.findMany({where:{status:VehicleStatus.AVAILABLE},orderBy:{name:'asc'}}))));
@@ -105,6 +129,11 @@ async function analytics(){
 app.get('/api/analytics',asyncRoute(async(_req,res)=>res.json(await analytics())));
 app.get('/api/analytics/export.csv',asyncRoute(async(_req,res)=>{const a=await analytics();const csv=['Vehicle,Registration,Operational Cost,ROI %',...a.byVehicle.map(x=>`"${x.name}","${x.registrationNo}",${x.operationalCost.toFixed(2)},${x.roi.toFixed(2)}`)].join('\n');res.type('text/csv').attachment('transitops-analytics.csv').send(csv);}));
 
-app.use((err:any,_req:Request,res:Response,_next:NextFunction)=>{console.error(err);if(err instanceof Prisma.PrismaClientKnownRequestError&&err.code==='P2002')return res.status(409).json({message:'A record with this unique value already exists'});res.status(err.status||500).json({message:err.message||'Internal server error'});});
+app.use((err:any,_req:Request,res:Response,_next:NextFunction)=>{
+  if(err instanceof Prisma.PrismaClientKnownRequestError&&err.code==='P2002')return res.status(409).json({message:'A record with this unique value already exists'});
+  if(err instanceof Prisma.PrismaClientInitializationError){console.error('Database unavailable for Prisma client.');return res.status(503).json({message:'Database is unavailable. Start PostgreSQL, apply the Prisma schema, and seed the demo users before signing in.'});}
+  console.error(err);
+  res.status(err.status||500).json({message:err.status?err.message:'Internal server error'});
+});
 app.listen(PORT,()=>console.log(`TransitOps API running at http://localhost:${PORT}`));
 process.on('SIGTERM',async()=>{await db.$disconnect();process.exit(0)});
