@@ -1,3 +1,5 @@
+import { describe, it } from "vitest";
+
 import { MockDriverStore } from "../../../src/features/drivers";
 import { MockFleetStore } from "../../../src/features/fleet";
 import { MockMaintenanceStore } from "../../../src/features/maintenance";
@@ -11,7 +13,9 @@ function assert(condition: unknown, message: string): asserts condition {
 
 function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
-    throw new Error(`${message}. Expected ${String(expected)}, received ${String(actual)}.`);
+    throw new Error(
+      `${message}. Expected ${String(expected)}, received ${String(actual)}.`,
+    );
   }
 }
 
@@ -84,17 +88,13 @@ function createStores() {
     { now: () => "2026-08-31T10:00:00.000Z" },
   );
 
-  const tripStore = new MockTripStore(
-    { fleetStore, driverStore },
-    [],
-    { now: () => "2026-08-31T10:00:00.000Z" },
-  );
+  const tripStore = new MockTripStore({ fleetStore, driverStore }, [], {
+    now: () => "2026-08-31T10:00:00.000Z",
+  });
 
-  const maintenanceStore = new MockMaintenanceStore(
-    { fleetStore },
-    [],
-    { now: () => "2026-08-31T10:00:00.000Z" },
-  );
+  const maintenanceStore = new MockMaintenanceStore({ fleetStore }, [], {
+    now: () => "2026-08-31T10:00:00.000Z",
+  });
 
   return { fleetStore, driverStore, tripStore, maintenanceStore };
 }
@@ -112,7 +112,11 @@ function testNormalizedVehicleRegistrationUniqueness(): void {
     region: "West",
   });
 
-  assertFailureCode(result, "DUPLICATE_REGISTRATION", "trimmed case-normalized registrations are unique");
+  assertFailureCode(
+    result,
+    "DUPLICATE_REGISTRATION",
+    "trimmed case-normalized registrations are unique",
+  );
 }
 
 function testEligibilityExplainsVehicleAndDriverBlockers(): void {
@@ -124,27 +128,39 @@ function testEligibilityExplainsVehicleAndDriverBlockers(): void {
   });
 
   assert(
-    resources.blockedVehicles.some((blocker) => blocker.code === "CARGO_EXCEEDS_CAPACITY"),
+    resources.blockedVehicles.some(
+      (blocker) => blocker.code === "CARGO_EXCEEDS_CAPACITY",
+    ),
     "capacity blocker is exposed for overloaded vehicles",
   );
   assert(
-    resources.blockedVehicles.some((blocker) => blocker.code === "VEHICLE_IN_MAINTENANCE"),
+    resources.blockedVehicles.some(
+      (blocker) => blocker.code === "VEHICLE_IN_MAINTENANCE",
+    ),
     "maintenance blocker is exposed for In Shop vehicles",
   );
   assert(
-    resources.blockedVehicles.some((blocker) => blocker.code === "VEHICLE_RETIRED"),
+    resources.blockedVehicles.some(
+      (blocker) => blocker.code === "VEHICLE_RETIRED",
+    ),
     "retirement blocker is exposed for Retired vehicles",
   );
   assert(
-    resources.blockedDrivers.some((blocker) => blocker.code === "DRIVER_LICENSE_EXPIRED"),
+    resources.blockedDrivers.some(
+      (blocker) => blocker.code === "DRIVER_LICENSE_EXPIRED",
+    ),
     "expired licence blocker is exposed for drivers",
   );
   assert(
-    resources.blockedDrivers.some((blocker) => blocker.code === "DRIVER_SUSPENDED"),
+    resources.blockedDrivers.some(
+      (blocker) => blocker.code === "DRIVER_SUSPENDED",
+    ),
     "suspension blocker is exposed for drivers",
   );
   assert(
-    resources.blockedDrivers.some((blocker) => blocker.code === "DRIVER_OFF_DUTY"),
+    resources.blockedDrivers.some(
+      (blocker) => blocker.code === "DRIVER_OFF_DUTY",
+    ),
     "off-duty blocker is exposed for drivers",
   );
   assert(
@@ -167,12 +183,30 @@ function testDispatchCompletesMandatoryWorkflowStep(): void {
   });
   assert(draft.ok, "valid draft trip is created");
 
-  const dispatched = tripStore.dispatchTrip(draft.data.id, { dispatchDate: "2026-08-31" });
+  const dispatched = tripStore.dispatchTrip(draft.data.id, {
+    dispatchDate: "2026-08-31",
+  });
   assert(dispatched.ok, "valid 450 kg cargo dispatches into 500 kg vehicle");
-  assertEqual(dispatched.data.status, "dispatched", "trip is marked dispatched");
-  assertEqual(dispatched.data.startOdometerKm, 1000, "start odometer is captured at dispatch");
-  assertEqual(fleetStore.getVehicle("vehicle-van-05")?.status, "on_trip", "vehicle is On Trip");
-  assertEqual(driverStore.getDriver("driver-alex")?.status, "on_trip", "driver is On Trip");
+  assertEqual(
+    dispatched.data.status,
+    "dispatched",
+    "trip is marked dispatched",
+  );
+  assertEqual(
+    dispatched.data.startOdometerKm,
+    1000,
+    "start odometer is captured at dispatch",
+  );
+  assertEqual(
+    fleetStore.getVehicle("vehicle-van-05")?.status,
+    "on_trip",
+    "vehicle is On Trip",
+  );
+  assertEqual(
+    driverStore.getDriver("driver-alex")?.status,
+    "on_trip",
+    "driver is On Trip",
+  );
 }
 
 function testFailedDispatchLeavesNoPartialState(): void {
@@ -189,11 +223,29 @@ function testFailedDispatchLeavesNoPartialState(): void {
   });
   assert(draft.ok, "draft with stale resource is allowed before dispatch");
 
-  const failed = tripStore.dispatchTrip(draft.data.id, { dispatchDate: "2026-08-31" });
-  assertFailureCode(failed, "DRIVER_LICENSE_EXPIRED", "expired driver blocks dispatch");
-  assertEqual(tripStore.getTrip(draft.data.id)?.status, "draft", "failed dispatch keeps trip Draft");
-  assertEqual(fleetStore.getVehicle("vehicle-van-05")?.status, "available", "failed dispatch keeps vehicle Available");
-  assertEqual(driverStore.getDriver("driver-expired")?.status, "available", "failed dispatch keeps driver Available");
+  const failed = tripStore.dispatchTrip(draft.data.id, {
+    dispatchDate: "2026-08-31",
+  });
+  assertFailureCode(
+    failed,
+    "DRIVER_LICENSE_EXPIRED",
+    "expired driver blocks dispatch",
+  );
+  assertEqual(
+    tripStore.getTrip(draft.data.id)?.status,
+    "draft",
+    "failed dispatch keeps trip Draft",
+  );
+  assertEqual(
+    fleetStore.getVehicle("vehicle-van-05")?.status,
+    "available",
+    "failed dispatch keeps vehicle Available",
+  );
+  assertEqual(
+    driverStore.getDriver("driver-expired")?.status,
+    "available",
+    "failed dispatch keeps driver Available",
+  );
 }
 
 function testCompletionRejectsDecreasingOdometerThenReleasesResources(): void {
@@ -210,26 +262,69 @@ function testCompletionRejectsDecreasingOdometerThenReleasesResources(): void {
   });
   assert(draft.ok, "draft is created");
 
-  const dispatched = tripStore.dispatchTrip(draft.data.id, { dispatchDate: "2026-08-31" });
+  const dispatched = tripStore.dispatchTrip(draft.data.id, {
+    dispatchDate: "2026-08-31",
+  });
   assert(dispatched.ok, "draft dispatches");
 
-  const tooLow = tripStore.completeTrip(draft.data.id, { finalOdometerKm: 999 });
-  assertFailureCode(tooLow, "FINAL_ODOMETER_TOO_LOW", "decreasing odometer is rejected");
-  assertEqual(tripStore.getTrip(draft.data.id)?.status, "dispatched", "failed completion keeps trip Dispatched");
-  assertEqual(fleetStore.getVehicle("vehicle-van-05")?.status, "on_trip", "failed completion keeps vehicle On Trip");
-  assertEqual(driverStore.getDriver("driver-alex")?.status, "on_trip", "failed completion keeps driver On Trip");
+  const tooLow = tripStore.completeTrip(draft.data.id, {
+    finalOdometerKm: 999,
+  });
+  assertFailureCode(
+    tooLow,
+    "FINAL_ODOMETER_TOO_LOW",
+    "decreasing odometer is rejected",
+  );
+  assertEqual(
+    tripStore.getTrip(draft.data.id)?.status,
+    "dispatched",
+    "failed completion keeps trip Dispatched",
+  );
+  assertEqual(
+    fleetStore.getVehicle("vehicle-van-05")?.status,
+    "on_trip",
+    "failed completion keeps vehicle On Trip",
+  );
+  assertEqual(
+    driverStore.getDriver("driver-alex")?.status,
+    "on_trip",
+    "failed completion keeps driver On Trip",
+  );
 
   const completed = tripStore.completeTrip(draft.data.id, {
     finalOdometerKm: 1080,
     fuel: { liters: 10, cost: 120, loggedDate: "2026-08-31" },
   });
-  assert(completed.ok, "completion succeeds with valid final odometer and fuel draft");
+  assert(
+    completed.ok,
+    "completion succeeds with valid final odometer and fuel draft",
+  );
   assertEqual(completed.data.status, "completed", "trip becomes Completed");
-  assertEqual(completed.data.actualDistanceKm, 80, "actual distance is final minus start odometer");
-  assertEqual(completed.data.completionFuelDraft?.liters, 10, "optional fuel draft is retained for finance integration");
-  assertEqual(fleetStore.getVehicle("vehicle-van-05")?.status, "available", "vehicle is released");
-  assertEqual(fleetStore.getVehicle("vehicle-van-05")?.odometerKm, 1080, "vehicle odometer is updated");
-  assertEqual(driverStore.getDriver("driver-alex")?.status, "available", "driver is released");
+  assertEqual(
+    completed.data.actualDistanceKm,
+    80,
+    "actual distance is final minus start odometer",
+  );
+  assertEqual(
+    completed.data.completionFuelDraft?.liters,
+    10,
+    "optional fuel draft is retained for finance integration",
+  );
+  assertEqual(
+    fleetStore.getVehicle("vehicle-van-05")?.status,
+    "available",
+    "vehicle is released",
+  );
+  assertEqual(
+    fleetStore.getVehicle("vehicle-van-05")?.odometerKm,
+    1080,
+    "vehicle odometer is updated",
+  );
+  assertEqual(
+    driverStore.getDriver("driver-alex")?.status,
+    "available",
+    "driver is released",
+  );
 }
 
 function testCancelReleasesOnlyDispatchedResources(): void {
@@ -246,17 +341,31 @@ function testCancelReleasesOnlyDispatchedResources(): void {
   });
   assert(draft.ok, "draft is created");
 
-  const dispatched = tripStore.dispatchTrip(draft.data.id, { dispatchDate: "2026-08-31" });
+  const dispatched = tripStore.dispatchTrip(draft.data.id, {
+    dispatchDate: "2026-08-31",
+  });
   assert(dispatched.ok, "draft dispatches");
 
   const cancelled = tripStore.cancelTrip(draft.data.id);
   assert(cancelled.ok, "dispatched trip cancels");
   assertEqual(cancelled.data.status, "cancelled", "trip is Cancelled");
-  assertEqual(fleetStore.getVehicle("vehicle-van-05")?.status, "available", "cancel releases vehicle");
-  assertEqual(driverStore.getDriver("driver-alex")?.status, "available", "cancel releases driver");
+  assertEqual(
+    fleetStore.getVehicle("vehicle-van-05")?.status,
+    "available",
+    "cancel releases vehicle",
+  );
+  assertEqual(
+    driverStore.getDriver("driver-alex")?.status,
+    "available",
+    "cancel releases driver",
+  );
 
   const terminalRetry = tripStore.cancelTrip(draft.data.id);
-  assertFailureCode(terminalRetry, "INVALID_TRIP_TRANSITION", "terminal trip cannot transition again");
+  assertFailureCode(
+    terminalRetry,
+    "INVALID_TRIP_TRANSITION",
+    "terminal trip cannot transition again",
+  );
 }
 
 function testMaintenanceOpenCloseAndDuplicateRules(): void {
@@ -268,14 +377,22 @@ function testMaintenanceOpenCloseAndDuplicateRules(): void {
     description: "Oil change",
   });
   assert(opened.ok, "maintenance opens on an available vehicle");
-  assertEqual(fleetStore.getVehicle("vehicle-van-05")?.status, "in_shop", "opening maintenance sends vehicle In Shop");
+  assertEqual(
+    fleetStore.getVehicle("vehicle-van-05")?.status,
+    "in_shop",
+    "opening maintenance sends vehicle In Shop",
+  );
 
   const duplicate = maintenanceStore.openMaintenance({
     vehicleId: "vehicle-van-05",
     maintenanceType: "repair",
     description: "Second log",
   });
-  assertFailureCode(duplicate, "ACTIVE_MAINTENANCE_EXISTS", "duplicate active maintenance is rejected");
+  assertFailureCode(
+    duplicate,
+    "ACTIVE_MAINTENANCE_EXISTS",
+    "duplicate active maintenance is rejected",
+  );
 
   const closed = maintenanceStore.closeMaintenance(opened.data.id, {
     cost: {
@@ -286,8 +403,16 @@ function testMaintenanceOpenCloseAndDuplicateRules(): void {
   });
   assert(closed.ok, "active maintenance closes");
   assertEqual(closed.data.status, "closed", "maintenance log is Closed");
-  assertEqual(closed.data.maintenanceCostDraft?.amount, 250, "one maintenance cost draft is attached");
-  assertEqual(fleetStore.getVehicle("vehicle-van-05")?.status, "available", "closing maintenance restores Available");
+  assertEqual(
+    closed.data.maintenanceCostDraft?.amount,
+    250,
+    "one maintenance cost draft is attached",
+  );
+  assertEqual(
+    fleetStore.getVehicle("vehicle-van-05")?.status,
+    "available",
+    "closing maintenance restores Available",
+  );
 }
 
 function testMaintenanceCloseKeepsRetiredVehicleRetired(): void {
@@ -305,21 +430,50 @@ function testMaintenanceCloseKeepsRetiredVehicleRetired(): void {
 
   const closed = maintenanceStore.closeMaintenance(opened.data.id);
   assert(closed.ok, "maintenance can close after vehicle retirement");
-  assertEqual(fleetStore.getVehicle("vehicle-van-05")?.status, "retired", "closed retired vehicle stays Retired");
+  assertEqual(
+    fleetStore.getVehicle("vehicle-van-05")?.status,
+    "retired",
+    "closed retired vehicle stays Retired",
+  );
 }
 
 const tests: Array<[string, () => void]> = [
-  ["normalized vehicle registration uniqueness", testNormalizedVehicleRegistrationUniqueness],
-  ["eligibility explains vehicle and driver blockers", testEligibilityExplainsVehicleAndDriverBlockers],
-  ["dispatch completes mandatory workflow step", testDispatchCompletesMandatoryWorkflowStep],
-  ["failed dispatch leaves no partial state", testFailedDispatchLeavesNoPartialState],
-  ["completion rejects decreasing odometer then releases resources", testCompletionRejectsDecreasingOdometerThenReleasesResources],
-  ["cancel releases only dispatched resources", testCancelReleasesOnlyDispatchedResources],
-  ["maintenance open, close, and duplicate rules", testMaintenanceOpenCloseAndDuplicateRules],
-  ["maintenance close keeps retired vehicle retired", testMaintenanceCloseKeepsRetiredVehicleRetired],
+  [
+    "normalized vehicle registration uniqueness",
+    testNormalizedVehicleRegistrationUniqueness,
+  ],
+  [
+    "eligibility explains vehicle and driver blockers",
+    testEligibilityExplainsVehicleAndDriverBlockers,
+  ],
+  [
+    "dispatch completes mandatory workflow step",
+    testDispatchCompletesMandatoryWorkflowStep,
+  ],
+  [
+    "failed dispatch leaves no partial state",
+    testFailedDispatchLeavesNoPartialState,
+  ],
+  [
+    "completion rejects decreasing odometer then releases resources",
+    testCompletionRejectsDecreasingOdometerThenReleasesResources,
+  ],
+  [
+    "cancel releases only dispatched resources",
+    testCancelReleasesOnlyDispatchedResources,
+  ],
+  [
+    "maintenance open, close, and duplicate rules",
+    testMaintenanceOpenCloseAndDuplicateRules,
+  ],
+  [
+    "maintenance close keeps retired vehicle retired",
+    testMaintenanceCloseKeepsRetiredVehicleRetired,
+  ],
 ];
 
-for (const [name, test] of tests) {
-  test();
-  console.log(`PASS ${name}`);
-}
+describe("Phase 0 operations contracts", () => {
+  for (const [name, test] of tests) {
+    it(name, test);
+  }
+});

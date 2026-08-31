@@ -1,7 +1,12 @@
+import type {
+  DomainErrorCode,
+  DriverStatus as SharedDriverStatus,
+} from "../../contracts";
+
 export type ISODateString = string;
 export type ISODateTimeString = string;
 
-export type DriverStatus = "available" | "on_trip" | "off_duty" | "suspended";
+export type DriverStatus = SharedDriverStatus;
 
 export interface DriverRecord {
   id: string;
@@ -36,13 +41,15 @@ export interface DriverFilters {
   licenseCategory?: string;
 }
 
-export type DriverErrorCode =
+export type DriverErrorCode = Extract<
+  DomainErrorCode,
   | "DRIVER_NOT_FOUND"
   | "DRIVER_ARCHIVED"
   | "DUPLICATE_LICENSE"
   | "INVALID_DRIVER_FIELD"
   | "DRIVER_ACTIVE_OPERATION"
-  | "INVALID_DRIVER_STATUS";
+  | "INVALID_DRIVER_STATUS"
+>;
 
 export interface DriverDomainError {
   code: DriverErrorCode;
@@ -52,8 +59,7 @@ export interface DriverDomainError {
 }
 
 export type DriverResult<T> =
-  | { ok: true; data: T }
-  | { ok: false; error: DriverDomainError };
+  { ok: true; data: T } | { ok: false; error: DriverDomainError };
 
 export interface MockDriverSeed {
   id?: string;

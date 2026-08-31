@@ -32,7 +32,9 @@ export function buildMockDriver(seed: MockDriverSeed, index = 0): DriverRecord {
   return {
     id: seed.id ?? `driver-${index + 1}`,
     name: seed.name.trim(),
-    licenseNumber: normalizeLicenseNumber(seed.licenseNumber ?? `LIC-${index + 1}`),
+    licenseNumber: normalizeLicenseNumber(
+      seed.licenseNumber ?? `LIC-${index + 1}`,
+    ),
     licenseCategory: (seed.licenseCategory ?? "LMV").trim(),
     licenseExpiryDate: seed.licenseExpiryDate ?? "2027-08-31",
     contactNumber: (seed.contactNumber ?? "0000000000").trim(),
@@ -81,20 +83,34 @@ function validateRequiredText(
   return { ok: true, data: undefined };
 }
 
-function validateDriverInput(input: UpdateDriverInput): DriverResult<undefined> {
+function validateDriverInput(
+  input: UpdateDriverInput,
+): DriverResult<undefined> {
   const name = validateRequiredText("name", input.name);
   if (!name.ok) return name;
 
-  const licenseNumber = validateRequiredText("licenseNumber", input.licenseNumber);
+  const licenseNumber = validateRequiredText(
+    "licenseNumber",
+    input.licenseNumber,
+  );
   if (!licenseNumber.ok) return licenseNumber;
 
-  const licenseCategory = validateRequiredText("licenseCategory", input.licenseCategory);
+  const licenseCategory = validateRequiredText(
+    "licenseCategory",
+    input.licenseCategory,
+  );
   if (!licenseCategory.ok) return licenseCategory;
 
-  const contactNumber = validateRequiredText("contactNumber", input.contactNumber);
+  const contactNumber = validateRequiredText(
+    "contactNumber",
+    input.contactNumber,
+  );
   if (!contactNumber.ok) return contactNumber;
 
-  if (input.licenseExpiryDate !== undefined && !ISO_DATE_PATTERN.test(input.licenseExpiryDate)) {
+  if (
+    input.licenseExpiryDate !== undefined &&
+    !ISO_DATE_PATTERN.test(input.licenseExpiryDate)
+  ) {
     return invalidField(
       "licenseExpiryDate",
       "Licence expiry date must use YYYY-MM-DD.",
@@ -104,9 +120,14 @@ function validateDriverInput(input: UpdateDriverInput): DriverResult<undefined> 
 
   if (
     input.safetyScore !== undefined &&
-    (!Number.isFinite(input.safetyScore) || input.safetyScore < 0 || input.safetyScore > 100)
+    (!Number.isFinite(input.safetyScore) ||
+      input.safetyScore < 0 ||
+      input.safetyScore > 100)
   ) {
-    return invalidField("safetyScore", "Safety score must be between 0 and 100.");
+    return invalidField(
+      "safetyScore",
+      "Safety score must be between 0 and 100.",
+    );
   }
 
   return { ok: true, data: undefined };
@@ -134,10 +155,14 @@ export class MockDriverStore {
 
     return [...this.drivers.values()]
       .filter((driver) => filters.includeArchived || driver.archivedAt === null)
-      .filter((driver) => filters.status === undefined || driver.status === filters.status)
       .filter(
         (driver) =>
-          filters.licenseCategory === undefined || driver.licenseCategory === filters.licenseCategory,
+          filters.status === undefined || driver.status === filters.status,
+      )
+      .filter(
+        (driver) =>
+          filters.licenseCategory === undefined ||
+          driver.licenseCategory === filters.licenseCategory,
       )
       .filter((driver) => {
         if (!query) return true;
@@ -156,7 +181,10 @@ export class MockDriverStore {
     return driver ? cloneDriver(driver) : undefined;
   }
 
-  createDriver(input: CreateDriverInput, createdBy: string | null = null): DriverResult<DriverRecord> {
+  createDriver(
+    input: CreateDriverInput,
+    createdBy: string | null = null,
+  ): DriverResult<DriverRecord> {
     const validation = validateDriverInput(input);
     if (!validation.ok) return validation;
 
@@ -190,7 +218,10 @@ export class MockDriverStore {
     return { ok: true, data: cloneDriver(driver) };
   }
 
-  updateDriver(driverId: string, input: UpdateDriverInput): DriverResult<DriverRecord> {
+  updateDriver(
+    driverId: string,
+    input: UpdateDriverInput,
+  ): DriverResult<DriverRecord> {
     const driver = this.drivers.get(driverId);
     if (!driver) {
       return driverError({
@@ -204,14 +235,17 @@ export class MockDriverStore {
       return driverError({
         code: "DRIVER_ARCHIVED",
         message: `${driver.name} is archived and cannot be edited.`,
-        recovery: "Restore or create a new driver record before making changes.",
+        recovery:
+          "Restore or create a new driver record before making changes.",
       });
     }
 
     const validation = validateDriverInput(input);
     if (!validation.ok) return validation;
 
-    const nextLicenseNumber = normalizeLicenseNumber(input.licenseNumber ?? driver.licenseNumber);
+    const nextLicenseNumber = normalizeLicenseNumber(
+      input.licenseNumber ?? driver.licenseNumber,
+    );
     if (this.hasLicense(nextLicenseNumber, driverId)) {
       return driverError({
         code: "DUPLICATE_LICENSE",
@@ -254,7 +288,11 @@ export class MockDriverStore {
       });
     }
 
-    const updated = { ...driver, archivedAt: this.now(), updatedAt: this.now() };
+    const updated = {
+      ...driver,
+      archivedAt: this.now(),
+      updatedAt: this.now(),
+    };
     this.drivers.set(driverId, updated);
     return { ok: true, data: cloneDriver(updated) };
   }
@@ -309,14 +347,19 @@ export class MockDriverStore {
       });
     }
 
-    const updated = { ...driver, status: "available" as const, updatedAt: this.now() };
+    const updated = {
+      ...driver,
+      status: "available" as const,
+      updatedAt: this.now(),
+    };
     this.drivers.set(driverId, updated);
     return { ok: true, data: cloneDriver(updated) };
   }
 
   private hasLicense(licenseNumber: string, exceptDriverId?: string): boolean {
     return [...this.drivers.values()].some(
-      (driver) => driver.id !== exceptDriverId && driver.licenseNumber === licenseNumber,
+      (driver) =>
+        driver.id !== exceptDriverId && driver.licenseNumber === licenseNumber,
     );
   }
 
@@ -352,7 +395,10 @@ export class MockDriverStore {
     return { ok: true, data: cloneDriver(updated) };
   }
 
-  private setDriverStatusOutsideTrip(driverId: string, nextStatus: Exclude<DriverStatus, "on_trip">): DriverResult<DriverRecord> {
+  private setDriverStatusOutsideTrip(
+    driverId: string,
+    nextStatus: Exclude<DriverStatus, "on_trip">,
+  ): DriverResult<DriverRecord> {
     const driver = this.drivers.get(driverId);
     if (!driver) {
       return driverError({
@@ -374,7 +420,8 @@ export class MockDriverStore {
       return driverError({
         code: "DRIVER_ACTIVE_OPERATION",
         message: `${driver.name} is On Trip and cannot be changed directly.`,
-        recovery: "Complete or cancel the active trip before changing driver status.",
+        recovery:
+          "Complete or cancel the active trip before changing driver status.",
       });
     }
 

@@ -1,7 +1,12 @@
+import type {
+  DomainErrorCode,
+  MaintenanceStatus as SharedMaintenanceStatus,
+} from "../../contracts";
+
 export type ISODateString = string;
 export type ISODateTimeString = string;
 
-export type MaintenanceStatus = "active" | "closed";
+export type MaintenanceStatus = SharedMaintenanceStatus;
 export type MaintenanceType = "preventive" | "repair" | "inspection" | "other";
 
 export interface MaintenanceCostDraft {
@@ -32,7 +37,8 @@ export interface CloseMaintenanceInput {
   cost?: MaintenanceCostDraft;
 }
 
-export type MaintenanceErrorCode =
+export type MaintenanceErrorCode = Extract<
+  DomainErrorCode,
   | "MAINTENANCE_NOT_FOUND"
   | "ACTIVE_MAINTENANCE_EXISTS"
   | "INVALID_MAINTENANCE_FIELD"
@@ -41,7 +47,8 @@ export type MaintenanceErrorCode =
   | "VEHICLE_ARCHIVED"
   | "VEHICLE_ON_TRIP"
   | "VEHICLE_RETIRED"
-  | "VEHICLE_IN_MAINTENANCE";
+  | "VEHICLE_IN_MAINTENANCE"
+>;
 
 export type MaintenanceField =
   | keyof OpenMaintenanceInput
@@ -57,8 +64,7 @@ export interface MaintenanceDomainError {
 }
 
 export type MaintenanceResult<T> =
-  | { ok: true; data: T }
-  | { ok: false; error: MaintenanceDomainError };
+  { ok: true; data: T } | { ok: false; error: MaintenanceDomainError };
 
 export interface MockMaintenanceSeed {
   id?: string;

@@ -73,6 +73,9 @@ export const ROLE_PERMISSIONS: Record<AppRole, readonly Permission[]> = {
   ],
 };
 
-export function roleHasPermission(role: AppRole, permission: Permission): boolean {
+export function roleHasPermission(
+  role: AppRole,
+  permission: Permission,
+): boolean {
   return ROLE_PERMISSIONS[role].includes(permission);
 }

@@ -26,7 +26,9 @@ export function buildMockMaintenanceLog(
     status: seed.status ?? "active",
     openedAt,
     closedAt: seed.closedAt ?? null,
-    maintenanceCostDraft: seed.maintenanceCostDraft ? { ...seed.maintenanceCostDraft } : null,
+    maintenanceCostDraft: seed.maintenanceCostDraft
+      ? { ...seed.maintenanceCostDraft }
+      : null,
     createdBy: seed.createdBy ?? null,
   };
 }
@@ -34,11 +36,15 @@ export function buildMockMaintenanceLog(
 function cloneMaintenanceLog(log: MaintenanceLogRecord): MaintenanceLogRecord {
   return {
     ...log,
-    maintenanceCostDraft: log.maintenanceCostDraft ? { ...log.maintenanceCostDraft } : null,
+    maintenanceCostDraft: log.maintenanceCostDraft
+      ? { ...log.maintenanceCostDraft }
+      : null,
   };
 }
 
-function maintenanceError(error: MaintenanceDomainError): MaintenanceResult<never> {
+function maintenanceError(
+  error: MaintenanceDomainError,
+): MaintenanceResult<never> {
   return { ok: false, error };
 }
 
@@ -54,25 +60,35 @@ function invalidMaintenanceField(
   });
 }
 
-function validateOpenMaintenanceInput(input: OpenMaintenanceInput): MaintenanceResult<undefined> {
+function validateOpenMaintenanceInput(
+  input: OpenMaintenanceInput,
+): MaintenanceResult<undefined> {
   if (input.vehicleId.trim().length === 0) {
     return invalidMaintenanceField("vehicleId", "Vehicle is required.");
   }
 
   if (input.description.trim().length === 0) {
-    return invalidMaintenanceField("description", "Maintenance description is required.");
+    return invalidMaintenanceField(
+      "description",
+      "Maintenance description is required.",
+    );
   }
 
   return { ok: true, data: undefined };
 }
 
-function validateCloseMaintenanceInput(input: CloseMaintenanceInput): MaintenanceResult<undefined> {
+function validateCloseMaintenanceInput(
+  input: CloseMaintenanceInput,
+): MaintenanceResult<undefined> {
   if (input.cost === undefined) {
     return { ok: true, data: undefined };
   }
 
   if (input.cost.amount < 0) {
-    return invalidMaintenanceField("costAmount", "Maintenance cost cannot be negative.");
+    return invalidMaintenanceField(
+      "costAmount",
+      "Maintenance cost cannot be negative.",
+    );
   }
 
   if (!ISO_DATE_PATTERN.test(input.cost.expenseDate)) {
@@ -83,7 +99,10 @@ function validateCloseMaintenanceInput(input: CloseMaintenanceInput): Maintenanc
   }
 
   if (input.cost.description.trim().length === 0) {
-    return invalidMaintenanceField("costDescription", "Maintenance cost description is required.");
+    return invalidMaintenanceField(
+      "costDescription",
+      "Maintenance cost description is required.",
+    );
   }
 
   return { ok: true, data: undefined };
@@ -151,7 +170,8 @@ export class MockMaintenanceStore {
         code: "VEHICLE_ON_TRIP",
         field: "vehicleId",
         message: `${vehicle.registrationNumber} is On Trip and cannot enter maintenance.`,
-        recovery: "Complete or cancel the active trip before opening maintenance.",
+        recovery:
+          "Complete or cancel the active trip before opening maintenance.",
       });
     }
 
@@ -164,7 +184,10 @@ export class MockMaintenanceStore {
       });
     }
 
-    if (vehicle.status === "in_shop" || this.hasActiveMaintenance(input.vehicleId)) {
+    if (
+      vehicle.status === "in_shop" ||
+      this.hasActiveMaintenance(input.vehicleId)
+    ) {
       return maintenanceError({
         code: "ACTIVE_MAINTENANCE_EXISTS",
         field: "vehicleId",
@@ -223,7 +246,9 @@ export class MockMaintenanceStore {
       });
     }
 
-    const restoredVehicle = this.fleetStore.restoreVehicleAfterMaintenance(log.vehicleId);
+    const restoredVehicle = this.fleetStore.restoreVehicleAfterMaintenance(
+      log.vehicleId,
+    );
     if (!restoredVehicle.ok) {
       return maintenanceError({
         code: "INVALID_MAINTENANCE_TRANSITION",

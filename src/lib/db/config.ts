@@ -38,7 +38,9 @@ function requireHttpUrl(value: string, name: string): string {
   return url.toString().replace(/\/$/, "");
 }
 
-export function getPublicSupabaseConfig(env: Environment): PublicSupabaseConfig {
+export function getPublicSupabaseConfig(
+  env: Environment,
+): PublicSupabaseConfig {
   const url = requireHttpUrl(
     requireEnvironmentValue(env, SUPABASE_ENV.url),
     SUPABASE_ENV.url,

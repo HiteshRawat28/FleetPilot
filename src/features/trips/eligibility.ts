@@ -84,7 +84,8 @@ export function getDriverDispatchBlockers(
       resourceId: driver.id,
       code: "DRIVER_SUSPENDED",
       message: `${driver.name} is Suspended and cannot be dispatched.`,
-      recovery: "Resolve the driver compliance status or choose another driver.",
+      recovery:
+        "Resolve the driver compliance status or choose another driver.",
     });
   }
 

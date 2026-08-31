@@ -13,8 +13,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "format": "prettier --write src package.json tsconfig.json next.config.ts postcss.config.mjs eslint.config.mjs README.md",
-    "format:check": "prettier --check src package.json tsconfig.json next.config.ts postcss.config.mjs eslint.config.mjs README.md"
+    "format": "prettier --write src tests package.json tsconfig.json next.config.ts postcss.config.mjs eslint.config.mjs README.md",
+    "format:check": "prettier --check src tests package.json tsconfig.json next.config.ts postcss.config.mjs eslint.config.mjs README.md"
   },
   "dependencies": {
     "next": "16.3.3",

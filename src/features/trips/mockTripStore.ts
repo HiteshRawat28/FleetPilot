@@ -10,7 +10,10 @@ import type {
   TripRecord,
   TripResult,
 } from "./types";
-import { getDriverDispatchBlockers, getVehicleDispatchBlockers } from "./eligibility";
+import {
+  getDriverDispatchBlockers,
+  getVehicleDispatchBlockers,
+} from "./eligibility";
 
 const DEFAULT_MOCK_NOW = "2026-08-31T00:00:00.000Z";
 
@@ -44,7 +47,9 @@ export function buildMockTrip(seed: MockTripSeed, index = 0): TripRecord {
 function cloneTrip(trip: TripRecord): TripRecord {
   return {
     ...trip,
-    completionFuelDraft: trip.completionFuelDraft ? { ...trip.completionFuelDraft } : null,
+    completionFuelDraft: trip.completionFuelDraft
+      ? { ...trip.completionFuelDraft }
+      : null,
   };
 }
 
@@ -52,7 +57,10 @@ function tripError(error: TripOperationError): TripResult<never> {
   return { ok: false, error };
 }
 
-function invalidTripField(field: keyof DraftTripInput, message: string): TripResult<never> {
+function invalidTripField(
+  field: keyof DraftTripInput,
+  message: string,
+): TripResult<never> {
   return tripError({
     code: "INVALID_TRIP_FIELD",
     field,
@@ -79,11 +87,17 @@ function validateDraftTripInput(input: DraftTripInput): TripResult<undefined> {
   }
 
   if (input.cargoWeightKg <= 0) {
-    return invalidTripField("cargoWeightKg", "Cargo weight must be greater than 0 kg.");
+    return invalidTripField(
+      "cargoWeightKg",
+      "Cargo weight must be greater than 0 kg.",
+    );
   }
 
   if (input.plannedDistanceKm <= 0) {
-    return invalidTripField("plannedDistanceKm", "Planned distance must be greater than 0 km.");
+    return invalidTripField(
+      "plannedDistanceKm",
+      "Planned distance must be greater than 0 km.",
+    );
   }
 
   if (input.revenue < 0) {
@@ -93,13 +107,16 @@ function validateDraftTripInput(input: DraftTripInput): TripResult<undefined> {
   return { ok: true, data: undefined };
 }
 
-function validateCompletionFuel(input: CompleteTripInput): TripResult<undefined> {
+function validateCompletionFuel(
+  input: CompleteTripInput,
+): TripResult<undefined> {
   if (input.finalOdometerKm < 0) {
     return tripError({
       code: "FINAL_ODOMETER_TOO_LOW",
       field: "finalOdometerKm",
       message: "Final odometer cannot be negative.",
-      recovery: "Enter an odometer reading at or above the current vehicle reading.",
+      recovery:
+        "Enter an odometer reading at or above the current vehicle reading.",
     });
   }
 
@@ -112,7 +129,8 @@ function validateCompletionFuel(input: CompleteTripInput): TripResult<undefined>
       code: "INVALID_FUEL_FIELD",
       field: "fuelLiters",
       message: "Fuel litres must be greater than 0.",
-      recovery: "Enter the fuel consumed for the completed trip or omit fuel for now.",
+      recovery:
+        "Enter the fuel consumed for the completed trip or omit fuel for now.",
     });
   }
 
@@ -161,27 +179,40 @@ export class MockTripStore {
     return trip ? cloneTrip(trip) : undefined;
   }
 
-  listEligibleResources(input: { cargoWeightKg?: number; dispatchDate: string }): EligibleResources {
+  listEligibleResources(input: {
+    cargoWeightKg?: number;
+    dispatchDate: string;
+  }): EligibleResources {
     const vehicles = this.fleetStore.listVehicles({ includeArchived: true });
     const drivers = this.driverStore.listDrivers({ includeArchived: true });
 
     const eligibleVehicles = vehicles.filter(
-      (vehicle) => getVehicleDispatchBlockers(vehicle, input.cargoWeightKg).length === 0,
+      (vehicle) =>
+        getVehicleDispatchBlockers(vehicle, input.cargoWeightKg).length === 0,
     );
     const blockedVehicles = vehicles.flatMap((vehicle) =>
       getVehicleDispatchBlockers(vehicle, input.cargoWeightKg),
     );
     const eligibleDrivers = drivers.filter(
-      (driver) => getDriverDispatchBlockers(driver, input.dispatchDate).length === 0,
+      (driver) =>
+        getDriverDispatchBlockers(driver, input.dispatchDate).length === 0,
     );
     const blockedDrivers = drivers.flatMap((driver) =>
       getDriverDispatchBlockers(driver, input.dispatchDate),
     );
 
-    return { eligibleVehicles, blockedVehicles, eligibleDrivers, blockedDrivers };
+    return {
+      eligibleVehicles,
+      blockedVehicles,
+      eligibleDrivers,
+      blockedDrivers,
+    };
   }
 
-  createDraftTrip(input: DraftTripInput, createdBy: string | null = null): TripResult<TripRecord> {
+  createDraftTrip(
+    input: DraftTripInput,
+    createdBy: string | null = null,
+  ): TripResult<TripRecord> {
     const validation = validateDraftTripInput(input);
     if (!validation.ok) return validation;
 
@@ -226,7 +257,10 @@ export class MockTripStore {
     return { ok: true, data: cloneTrip(trip) };
   }
 
-  dispatchTrip(tripId: string, options: { dispatchDate: string } = { dispatchDate: "2026-08-31" }): TripResult<TripRecord> {
+  dispatchTrip(
+    tripId: string,
+    options: { dispatchDate: string } = { dispatchDate: "2026-08-31" },
+  ): TripResult<TripRecord> {
     const trip = this.trips.get(tripId);
     if (!trip) {
       return tripError({
@@ -264,7 +298,9 @@ export class MockTripStore {
       });
     }
 
-    const reservedVehicle = this.fleetStore.reserveVehicleForTrip(trip.vehicleId);
+    const reservedVehicle = this.fleetStore.reserveVehicleForTrip(
+      trip.vehicleId,
+    );
     if (!reservedVehicle.ok) {
       return tripError({
         code: "RESOURCE_ALREADY_ASSIGNED",
@@ -295,7 +331,10 @@ export class MockTripStore {
     return { ok: true, data: cloneTrip(updated) };
   }
 
-  completeTrip(tripId: string, input: CompleteTripInput): TripResult<TripRecord> {
+  completeTrip(
+    tripId: string,
+    input: CompleteTripInput,
+  ): TripResult<TripRecord> {
     const validation = validateCompletionFuel(input);
     if (!validation.ok) return validation;
 
@@ -333,11 +372,14 @@ export class MockTripStore {
         code: "FINAL_ODOMETER_TOO_LOW",
         field: "finalOdometerKm",
         message: `Final odometer must be at least ${lowestAllowedOdometer} km.`,
-        recovery: "Enter a final reading that does not decrease the vehicle odometer.",
+        recovery:
+          "Enter a final reading that does not decrease the vehicle odometer.",
       });
     }
 
-    const releasedVehicle = this.fleetStore.releaseVehicleFromTrip(trip.vehicleId);
+    const releasedVehicle = this.fleetStore.releaseVehicleFromTrip(
+      trip.vehicleId,
+    );
     if (!releasedVehicle.ok) {
       return tripError({
         code: "RESOURCE_ALREADY_ASSIGNED",
@@ -346,7 +388,9 @@ export class MockTripStore {
       });
     }
 
-    const releasedDriver = this.driverStore.releaseDriverFromTrip(trip.driverId);
+    const releasedDriver = this.driverStore.releaseDriverFromTrip(
+      trip.driverId,
+    );
     if (!releasedDriver.ok) {
       this.fleetStore.reserveVehicleForTrip(trip.vehicleId);
       return tripError({
@@ -402,7 +446,9 @@ export class MockTripStore {
     }
 
     if (trip.status === "dispatched") {
-      const releasedVehicle = this.fleetStore.releaseVehicleFromTrip(trip.vehicleId);
+      const releasedVehicle = this.fleetStore.releaseVehicleFromTrip(
+        trip.vehicleId,
+      );
       if (!releasedVehicle.ok) {
         return tripError({
           code: "RESOURCE_ALREADY_ASSIGNED",
@@ -411,7 +457,9 @@ export class MockTripStore {
         });
       }
 
-      const releasedDriver = this.driverStore.releaseDriverFromTrip(trip.driverId);
+      const releasedDriver = this.driverStore.releaseDriverFromTrip(
+        trip.driverId,
+      );
       if (!releasedDriver.ok) {
         this.fleetStore.reserveVehicleForTrip(trip.vehicleId);
         return tripError({
@@ -465,7 +513,8 @@ export class MockTripStore {
       (candidate) =>
         candidate.id !== trip.id &&
         candidate.status === "dispatched" &&
-        (candidate.vehicleId === trip.vehicleId || candidate.driverId === trip.driverId),
+        (candidate.vehicleId === trip.vehicleId ||
+          candidate.driverId === trip.driverId),
     );
 
     if (conflictingTrip) {
@@ -473,7 +522,8 @@ export class MockTripStore {
         resourceKind: "trip" as const,
         resourceId: conflictingTrip.id,
         code: "RESOURCE_ALREADY_ASSIGNED" as const,
-        message: "The selected vehicle or driver is already assigned to a dispatched trip.",
+        message:
+          "The selected vehicle or driver is already assigned to a dispatched trip.",
         recovery: "Complete or cancel the active trip, then retry dispatch.",
       });
     }

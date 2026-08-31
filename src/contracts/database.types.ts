@@ -293,7 +293,8 @@ export type Database = {
     Views: { [_ in never]: never };
     Functions: { [_ in never]: never };
     Enums: {
-      user_role: "fleet_manager" | "dispatcher" | "safety_officer" | "financial_analyst";
+      user_role:
+        "fleet_manager" | "dispatcher" | "safety_officer" | "financial_analyst";
       vehicle_status: "available" | "on_trip" | "in_shop" | "retired";
       driver_status: "available" | "on_trip" | "off_duty" | "suspended";
       trip_status: "draft" | "dispatched" | "completed" | "cancelled";
