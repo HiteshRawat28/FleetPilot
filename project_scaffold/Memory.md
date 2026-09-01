@@ -39,6 +39,12 @@
 
 ## Milestone log
 
+### 2026-09-01 — Dashboard manual trip shortcut
+
+- Connected the dashboard `New trip` action to the existing Trip dispatch workflow, where it opens the full manual trip planner immediately after navigation.
+- Reused the current trip form and API path so route estimates, resource availability, assignment validation, profitability, and draft creation remain consistent with trips created from Trip dispatch.
+- Limited the shortcut to Owner, Administrator, Fleet Manager, and Dispatcher roles; Safety Officer and Financial Analyst dashboards do not render it.
+
 ### 2026-09-01 — Organization-admin conversational trip creation
 
 - Added an organization-administrator guided planner inside Copilot for `OWNER` and `ADMIN`, with organization-scoped clickable vehicle and compatible-driver choices. Remaining route, cargo, distance, and revenue details are collected conversationally, one missing value at a time.
