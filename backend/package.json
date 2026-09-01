@@ -9,9 +9,12 @@
     "start": "node dist/src/server.js",
     "prisma:generate": "prisma generate",
     "db:push": "prisma db push",
-    "db:upgrade": "prisma db execute --schema prisma/schema.prisma --file prisma/upgrade-existing-database.sql && prisma db push --skip-generate",
+    "db:upgrade": "prisma db execute --schema prisma/schema.prisma --file prisma/upgrade-existing-database.sql && prisma generate",
+    "db:upgrade:trip-dispatch": "prisma db execute --schema prisma/schema.prisma --file prisma/upgrade-trip-dispatch-fastag.sql && prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:seed": "tsx prisma/seed.ts",
+    "db:seed:chatbot": "tsx prisma/seed-chatbot-test-data.ts",
+    "db:clean:chatbot": "tsx prisma/seed-chatbot-test-data.ts --clean",
     "test": "vitest run"
   },
   "dependencies": {

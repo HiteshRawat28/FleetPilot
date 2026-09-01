@@ -28,6 +28,8 @@
 
 ## Interaction rules
 
+- The authenticated Copilot launcher is a fixed circular FleetPilot logo button at the bottom-right of every module; it is not part of the dashboard header.
+- Company Owners and Organization Administrators see clickable available-vehicle and compatible-driver cards inside Copilot. Missing origin, destination, cargo, distance, and revenue values are requested as chat messages; the complete trip becomes a review card with an in-chat confirmation button.
 - Every request surface should distinguish loading, empty, error, conflict, disabled/submitting, and success states.
 - Server assignment failures should remain structured and field-specific; the UI may pre-check but must display server reasons.
 - Show all assignment conflicts in one panel with concise operational language; never reveal them one submission at a time when the server knows multiple reasons.

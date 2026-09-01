@@ -59,8 +59,25 @@ Unique business keys are user email, vehicle registration, driver license number
 - Maintenance: list, create, close.
 - Finance: list, add fuel, add expense.
 - Analytics: JSON summary and CSV export.
+- Copilot: status, role-scoped chat/tool loop, and guarded action confirmation.
 
 See `backend/src/server.ts` for the exact route/role matrix; it is the current source of truth.
+
+### Copilot action boundary
+
+- Groq may select allowlisted read/recommendation tools. Organization administrators (`OWNER` and `ADMIN`) may prepare and confirm a draft-trip proposal; employee roles are rejected at the server action boundary.
+- The guided planner loads organization-scoped available vehicles and drivers and submits their selected IDs directly to FleetPilot's backend. Internal selection IDs are not sent through Groq.
+- A prepared action contains a short-lived HMAC-signed payload bound to the user, organization, role, action type, and idempotency key. The confirmation token is not persisted in browser history.
+- `POST /api/chat/actions/confirm` verifies that envelope, rechecks role and assignment eligibility, creates only a `DRAFT` trip in a serializable transaction, and records the result in `CopilotAction`.
+- Reusing the same organization/idempotency key returns the original trip. All lifecycle-changing and financial writes remain outside Copilot.
+
+### Copilot disclosure and browser-session boundary
+
+- Every Copilot query takes `organizationId` from the authenticated server session; the model cannot provide or override a tenant identifier.
+- Tool results pass through explicit per-role projections before being sent to Groq. Internal row IDs are never included, Dispatcher results omit driver licence numbers and trip revenue, and Safety/Finance fleet summaries omit recent trip identities.
+- Financial analytics, both through Copilot and the direct JSON/CSV endpoints, are limited to Owner, Admin, Fleet Manager, and Financial Analyst roles.
+- Final assistant text is deterministically filtered for known internal identifiers, CUIDs, UUIDs, and JWT-shaped tokens before it reaches the browser.
+- Browser JWTs are held in an 8-hour `HttpOnly`, `SameSite=Lax` cookie (`Secure` in production). Copilot history uses per-user/per-organization session storage and is cleared at logout; legacy local-storage tokens/history are removed.
 
 ### Assignment validation interface
 
@@ -88,7 +105,7 @@ See `backend/src/server.ts` for the exact route/role matrix; it is the current s
 
 ## Configuration
 
-- Backend: `DATABASE_URL`, `JWT_SECRET`, `PORT`, comma-separated `FRONTEND_URL`.
+- Backend: `DATABASE_URL`, `JWT_SECRET`, `COPILOT_ACTION_SECRET`, `GROQ_API_KEY`, optional `GROQ_MODEL`, `PORT`, comma-separated `FRONTEND_URL`.
 - Frontend: `VITE_API_URL`.
 - Local PostgreSQL: database/user/password and port `5432` are defined in `docker-compose.yml`.
 - No application Dockerfile, CI workflow, production deployment, reverse proxy, or migration history is currently established.
@@ -99,8 +116,8 @@ See `backend/src/server.ts` for the exact route/role matrix; it is the current s
 - Direct vehicle/driver status edits can bypass lifecycle invariants.
 - Completion does not enforce monotonic odometer at the API boundary.
 - Maintenance creation/cancellation/closing are transactional but not fully protected against concurrent conflicting operations.
-- JWT has a development fallback, no rate limiting/revocation, and is stored in browser localStorage.
-- Most reads are available to every authenticated role.
+- JWT signing still has a development fallback and sessions have no server-side revocation list; production must set a strong `JWT_SECRET` and terminate TLS before the API.
+- Aggregate dashboard counts remain available to every authenticated role, while recent identities and financial analytics are role-restricted.
 - Monetary fields use floating-point storage.
 - Analytics loads whole tables and uses formulas whose status/time semantics are not approved.
 - Raw Prisma records tightly couple database and frontend contracts.

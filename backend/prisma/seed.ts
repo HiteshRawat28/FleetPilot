@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 
 const db = new PrismaClient();
 async function main() {
+  await db.fastagTransaction.deleteMany(); await db.fastagConnection.deleteMany(); await db.tripEvidence.deleteMany(); await db.driverDocument.deleteMany();
   await db.expense.deleteMany(); await db.fuelLog.deleteMany(); await db.maintenance.deleteMany();
   await db.trip.deleteMany(); await db.driver.deleteMany(); await db.vehicle.deleteMany(); await db.user.deleteMany(); await db.organization.deleteMany();
   const passwordHash = await bcrypt.hash('Password@123', 12);

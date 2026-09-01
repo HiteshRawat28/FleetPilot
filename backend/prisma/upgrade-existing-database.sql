@@ -5,22 +5,23 @@
 -- be used by later statements.
 ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'OWNER';
 ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'ADMIN';
-ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'DRIVER';
-DO $$ BEGIN ALTER TYPE "ExpenseType" ADD VALUE IF NOT EXISTS 'DRIVER_PAYMENT'; EXCEPTION WHEN undefined_object THEN NULL; END $$;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'LicenseCategory') THEN
+    CREATE TYPE "LicenseCategory" AS ENUM ('LMV', 'HMV', 'MCWG');
+  ELSE
+    ALTER TYPE "LicenseCategory" ADD VALUE IF NOT EXISTS 'LMV';
+    ALTER TYPE "LicenseCategory" ADD VALUE IF NOT EXISTS 'HMV';
+    ALTER TYPE "LicenseCategory" ADD VALUE IF NOT EXISTS 'MCWG';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'DriverPayType') THEN
+    CREATE TYPE "DriverPayType" AS ENUM ('PER_TRIP', 'HOURLY');
+  END IF;
+END $$;
+ALTER TYPE "ExpenseType" ADD VALUE IF NOT EXISTS 'DRIVER_PAYMENT';
 COMMIT;
 
 BEGIN;
-
-DO $$ BEGIN CREATE TYPE "OnboardingStatus" AS ENUM ('PENDING','NEEDS_REVIEW','VERIFIED','REJECTED'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE TYPE "DriverDocumentType" AS ENUM ('PROFILE_PHOTO','LICENSE_FRONT','LICENSE_BACK'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE TYPE "DriverPayType" AS ENUM ('PER_TRIP','HOURLY'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$
-BEGIN
-  CREATE TYPE "LicenseCategory" AS ENUM ('LMV', 'HMV', 'MCWG');
-EXCEPTION
-  WHEN duplicate_object THEN NULL;
-END $$;
 
 CREATE TABLE IF NOT EXISTS "Organization" (
   "id" TEXT NOT NULL,
@@ -45,40 +46,35 @@ WHERE NOT EXISTS (
 );
 
 ALTER TABLE "User"
-  ADD COLUMN IF NOT EXISTS "googleSub" TEXT,
   ADD COLUMN IF NOT EXISTS "phone" TEXT,
   ADD COLUMN IF NOT EXISTS "jobTitle" TEXT,
   ADD COLUMN IF NOT EXISTS "avatarKey" TEXT,
   ADD COLUMN IF NOT EXISTS "mustChangePassword" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS "googleSub" TEXT,
   ADD COLUMN IF NOT EXISTS "isActive" BOOLEAN NOT NULL DEFAULT true,
   ADD COLUMN IF NOT EXISTS "lastActiveAt" TIMESTAMP(3),
   ADD COLUMN IF NOT EXISTS "lastLoginAt" TIMESTAMP(3),
   ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
 
 ALTER TABLE "Vehicle" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
-ALTER TABLE "Vehicle"
-  ADD COLUMN IF NOT EXISTS "requiredLicenseCategory" "LicenseCategory" NOT NULL DEFAULT 'LMV';
 ALTER TABLE "Driver" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
-ALTER TABLE "Driver" ADD COLUMN IF NOT EXISTS "userId" TEXT;
-ALTER TABLE "Driver" ADD COLUMN IF NOT EXISTS "onboardingStatus" "OnboardingStatus" NOT NULL DEFAULT 'VERIFIED';
-ALTER TABLE "Driver" ADD COLUMN IF NOT EXISTS "reviewNote" TEXT;
-ALTER TABLE "Driver" ADD COLUMN IF NOT EXISTS "payType" "DriverPayType" NOT NULL DEFAULT 'PER_TRIP';
-ALTER TABLE "Driver" ADD COLUMN IF NOT EXISTS "payRate" DOUBLE PRECISION NOT NULL DEFAULT 0;
-
-CREATE TABLE IF NOT EXISTS "DriverDocument" ("id" TEXT NOT NULL,"driverId" TEXT NOT NULL,"type" "DriverDocumentType" NOT NULL,"objectKey" TEXT NOT NULL,"originalName" TEXT NOT NULL,"mimeType" TEXT NOT NULL,"size" INTEGER NOT NULL,"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,CONSTRAINT "DriverDocument_pkey" PRIMARY KEY ("id"));
-CREATE UNIQUE INDEX IF NOT EXISTS "Driver_userId_key" ON "Driver"("userId");
-CREATE UNIQUE INDEX IF NOT EXISTS "DriverDocument_driverId_type_key" ON "DriverDocument"("driverId","type");
-CREATE INDEX IF NOT EXISTS "DriverDocument_driverId_idx" ON "DriverDocument"("driverId");
+ALTER TABLE "Driver"
+  ADD COLUMN IF NOT EXISTS "payType" "DriverPayType" NOT NULL DEFAULT 'PER_TRIP',
+  ADD COLUMN IF NOT EXISTS "payRate" DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
+ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "estimatedTollsInr" DOUBLE PRECISION;
+ALTER TABLE "Trip" ALTER COLUMN "estimatedTollsInr" DROP DEFAULT;
+ALTER TABLE "Trip" ALTER COLUMN "estimatedTollsInr" DROP NOT NULL;
+ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "estimatedDurationMin" INTEGER;
+ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "routeSummary" TEXT;
+ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "routeProvider" TEXT;
+ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "tollEstimateStatus" TEXT;
+ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "routeEstimatedAt" TIMESTAMP(3);
 ALTER TABLE "Maintenance" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
 ALTER TABLE "FuelLog" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
-ALTER TABLE "Expense"
-  ADD COLUMN IF NOT EXISTS "organizationId" TEXT,
-  ADD COLUMN IF NOT EXISTS "submittedByDriverId" TEXT,
-  ADD COLUMN IF NOT EXISTS "receiptKey" TEXT,
-  ADD COLUMN IF NOT EXISTS "receiptOriginalName" TEXT,
-  ADD COLUMN IF NOT EXISTS "receiptMimeType" TEXT,
-  ADD COLUMN IF NOT EXISTS "ocrConfidence" INTEGER;
+ALTER TABLE "Expense" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
+ALTER TABLE "Vehicle"
+  ADD COLUMN IF NOT EXISTS "requiredLicenseCategory" "LicenseCategory" NOT NULL DEFAULT 'LMV';
 
 UPDATE "User" SET "organizationId" = 'legacy-organization' WHERE "organizationId" IS NULL;
 UPDATE "Vehicle" SET "organizationId" = 'legacy-organization' WHERE "organizationId" IS NULL;
@@ -121,7 +117,6 @@ CREATE INDEX IF NOT EXISTS "Trip_organizationId_idx" ON "Trip"("organizationId")
 CREATE INDEX IF NOT EXISTS "Maintenance_organizationId_idx" ON "Maintenance"("organizationId");
 CREATE INDEX IF NOT EXISTS "FuelLog_organizationId_idx" ON "FuelLog"("organizationId");
 CREATE INDEX IF NOT EXISTS "Expense_organizationId_idx" ON "Expense"("organizationId");
-CREATE INDEX IF NOT EXISTS "Expense_submittedByDriverId_idx" ON "Expense"("submittedByDriverId");
 CREATE UNIQUE INDEX IF NOT EXISTS "Vehicle_organizationId_registrationNo_key"
   ON "Vehicle"("organizationId", "registrationNo");
 CREATE UNIQUE INDEX IF NOT EXISTS "Driver_organizationId_licenseNo_key"
@@ -143,14 +138,6 @@ BEGIN
     ALTER TABLE "Driver" ADD CONSTRAINT "Driver_organizationId_fkey"
       FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Driver_userId_fkey') THEN
-    ALTER TABLE "Driver" ADD CONSTRAINT "Driver_userId_fkey"
-      FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'DriverDocument_driverId_fkey') THEN
-    ALTER TABLE "DriverDocument" ADD CONSTRAINT "DriverDocument_driverId_fkey"
-      FOREIGN KEY ("driverId") REFERENCES "Driver"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Trip_organizationId_fkey') THEN
     ALTER TABLE "Trip" ADD CONSTRAINT "Trip_organizationId_fkey"
       FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -167,9 +154,39 @@ BEGIN
     ALTER TABLE "Expense" ADD CONSTRAINT "Expense_organizationId_fkey"
       FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Expense_submittedByDriverId_fkey') THEN
-    ALTER TABLE "Expense" ADD CONSTRAINT "Expense_submittedByDriverId_fkey"
-      FOREIGN KEY ("submittedByDriverId") REFERENCES "Driver"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+END $$;
+
+CREATE TABLE IF NOT EXISTS "CopilotAction" (
+  "id" TEXT NOT NULL,
+  "organizationId" TEXT NOT NULL,
+  "userId" TEXT NOT NULL,
+  "type" TEXT NOT NULL,
+  "status" TEXT NOT NULL,
+  "idempotencyKey" TEXT NOT NULL,
+  "request" JSONB NOT NULL,
+  "result" JSONB,
+  "tripId" TEXT,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "CopilotAction_pkey" PRIMARY KEY ("id")
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "CopilotAction_organizationId_idempotencyKey_key"
+  ON "CopilotAction"("organizationId", "idempotencyKey");
+CREATE INDEX IF NOT EXISTS "CopilotAction_organizationId_createdAt_idx"
+  ON "CopilotAction"("organizationId", "createdAt");
+CREATE INDEX IF NOT EXISTS "CopilotAction_userId_idx" ON "CopilotAction"("userId");
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CopilotAction_organizationId_fkey') THEN
+    ALTER TABLE "CopilotAction" ADD CONSTRAINT "CopilotAction_organizationId_fkey"
+      FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CopilotAction_userId_fkey') THEN
+    ALTER TABLE "CopilotAction" ADD CONSTRAINT "CopilotAction_userId_fkey"
+      FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CopilotAction_tripId_fkey') THEN
+    ALTER TABLE "CopilotAction" ADD CONSTRAINT "CopilotAction_tripId_fkey"
+      FOREIGN KEY ("tripId") REFERENCES "Trip"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
 END $$;
 

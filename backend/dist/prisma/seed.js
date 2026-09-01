@@ -7,6 +7,10 @@ const client_1 = require("@prisma/client");
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const db = new client_1.PrismaClient();
 async function main() {
+    await db.fastagTransaction.deleteMany();
+    await db.fastagConnection.deleteMany();
+    await db.tripEvidence.deleteMany();
+    await db.driverDocument.deleteMany();
     await db.expense.deleteMany();
     await db.fuelLog.deleteMany();
     await db.maintenance.deleteMany();
