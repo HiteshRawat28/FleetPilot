@@ -12,19 +12,29 @@ const client_1 = require("@prisma/client");
 const zod_1 = require("zod");
 const google_auth_library_1 = require("google-auth-library");
 const assignmentEligibility_1 = require("./services/assignmentEligibility");
+const tripProfitability_1 = require("./services/tripProfitability");
+const historicalTollEstimate_1 = require("./services/historicalTollEstimate");
+const routePlanning_1 = require("./constants/routePlanning");
 const chat_1 = require("./chat/chat");
+const security_1 = require("./chat/security");
+const session_1 = require("./auth/session");
 const db = new client_1.PrismaClient();
 const app = (0, express_1.default)();
 const PORT = Number(process.env.PORT || 4000);
 const SECRET = process.env.JWT_SECRET || 'development-only-change-me';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const tripProfitabilityConfig = (0, tripProfitability_1.loadTripProfitabilityConfig)();
 const googleClient = new google_auth_library_1.OAuth2Client(GOOGLE_CLIENT_ID);
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173').split(',').map(origin => origin.trim());
-app.use((0, cors_1.default)({ origin: (origin, callback) => !origin || allowedOrigins.includes(origin) ? callback(null, true) : callback(new Error('Origin is not allowed by CORS')), credentials: true }));
+const cookieOptions = (0, session_1.sessionCookieOptions)(process.env.NODE_ENV === 'production');
+app.use((_req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer'); res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()'); res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'"); res.setHeader('Cross-Origin-Resource-Policy', 'same-site'); next(); });
+app.use((0, cors_1.default)({ origin: (origin, callback) => !origin || allowedOrigins.includes(origin) ? callback(null, true) : callback(Object.assign(new Error('Origin is not allowed by CORS'), { status: 403 })), credentials: true }));
 app.use(express_1.default.json());
+app.use('/api', (req, res, next) => { if (['GET', 'HEAD', 'OPTIONS'].includes(req.method) || !req.headers.origin || allowedOrigins.includes(req.headers.origin))
+    return next(); res.status(403).json({ message: 'Request origin is not allowed' }); });
 const asyncRoute = (fn) => (req, res, next) => { Promise.resolve(fn(req, res, next)).catch(next); };
 const authenticate = asyncRoute(async (req, res, next) => {
-    const token = req.headers.authorization?.replace(/^Bearer\s+/, '');
+    const token = (0, session_1.sessionToken)({ authorization: req.headers.authorization, cookie: req.headers.cookie });
     if (!token)
         return res.status(401).json({ message: 'Authentication required' });
     try {
@@ -47,7 +57,7 @@ const parse = (schema, data) => { const out = schema.safeParse(data); if (!out.s
 const idParam = (req) => String(req.params.id);
 const slugify = (name) => name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 45);
 const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email, role: user.role, organizationId: user.organizationId, organizationName: user.organization.name });
-const issueSession = (user) => ({ token: jsonwebtoken_1.default.sign(user, SECRET, { expiresIn: '8h' }), user });
+const sendSession = (res, user, status = 200) => { res.cookie(session_1.SESSION_COOKIE, jsonwebtoken_1.default.sign(user, SECRET, { expiresIn: '8h' }), cookieOptions); res.setHeader('Cache-Control', 'no-store'); return res.status(status).json({ user }); };
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'TransitOps API' }));
 app.post('/api/auth/login', asyncRoute(async (req, res) => {
     const { email, password } = parse(zod_1.z.object({ email: zod_1.z.email(), password: zod_1.z.string().min(8) }), req.body);
@@ -57,7 +67,7 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
     if (!user.isActive)
         return res.status(403).json({ message: 'Your account has been suspended. Contact your company administrator.' });
     await db.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date(), lastActiveAt: new Date() } });
-    res.json(issueSession(publicUser(user)));
+    sendSession(res, publicUser(user));
 }));
 app.post('/api/auth/register', asyncRoute(async (req, res) => {
     const { name, email, password, companyName } = parse(zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: zod_1.z.string().min(10).regex(/[A-Z]/, 'Password needs an uppercase letter').regex(/[0-9]/, 'Password needs a number'), companyName: zod_1.z.string().trim().min(2).max(100) }), req.body);
@@ -73,7 +83,7 @@ app.post('/api/auth/register', asyncRoute(async (req, res) => {
         const organization = await tx.organization.create({ data: { name: companyName, slug, operationsEmail: normalizedEmail } });
         return tx.user.create({ data: { name, email: normalizedEmail, passwordHash: await bcryptjs_1.default.hash(password, 12), role: client_1.Role.OWNER, organizationId: organization.id, lastLoginAt: new Date(), lastActiveAt: new Date() }, include: { organization: true } });
     });
-    res.status(201).json(issueSession(publicUser(user)));
+    sendSession(res, publicUser(user), 201);
 }));
 app.post('/api/auth/google', asyncRoute(async (req, res) => {
     if (!GOOGLE_CLIENT_ID)
@@ -102,9 +112,10 @@ app.post('/api/auth/google', asyncRoute(async (req, res) => {
             return res.status(409).json({ message: 'This email is linked to another Google identity' });
         user = await db.user.update({ where: { id: user.id }, data: { googleSub: payload.sub, lastLoginAt: new Date(), lastActiveAt: new Date() }, include: { organization: true } });
     }
-    res.json(issueSession(publicUser(user)));
+    sendSession(res, publicUser(user));
 }));
-app.get('/api/auth/me', authenticate, (req, res) => res.json({ user: req.user }));
+app.post('/api/auth/logout', (_req, res) => { const { maxAge: _maxAge, ...clearCookieOptions } = cookieOptions; res.clearCookie(session_1.SESSION_COOKIE, clearCookieOptions); res.status(204).end(); });
+app.get('/api/auth/me', authenticate, (req, res) => { res.setHeader('Cache-Control', 'no-store'); res.json({ user: req.user }); });
 app.use('/api', authenticate);
 app.use('/api/chat', (0, chat_1.createChatRouter)(db));
 app.get('/api/organization', asyncRoute(async (req, res) => res.json(await db.organization.findUnique({ where: { id: req.user.organizationId } }))));
@@ -117,9 +128,10 @@ app.patch('/api/users/:id', allow(client_1.Role.OWNER, client_1.Role.ADMIN), asy
     return res.status(403).json({ message: 'Owner access cannot be changed' }); const data = parse(zod_1.z.object({ role: zod_1.z.enum(client_1.Role).refine(r => r !== client_1.Role.OWNER).optional(), isActive: zod_1.z.boolean().optional(), password: zod_1.z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/).optional() }), req.body); if (req.user.role === client_1.Role.ADMIN && (target.role === client_1.Role.ADMIN || data.role === client_1.Role.ADMIN))
     return res.status(403).json({ message: 'Only the Owner can manage Admin access' }); res.json(await db.user.update({ where: { id: target.id }, data: { role: data.role, isActive: data.isActive, ...(data.password ? { passwordHash: await bcryptjs_1.default.hash(data.password, 12) } : {}) }, select: { id: true, name: true, email: true, role: true, isActive: true, lastLoginAt: true, lastActiveAt: true, createdAt: true, googleSub: true } })); }));
 app.get('/api/dashboard', asyncRoute(async (req, res) => {
+    const showRecentTrips = (0, security_1.disclosurePolicyForRole)(req.user.role).recentTripDetails;
     const [vehicles, drivers, trips, recentTrips] = await Promise.all([
         db.vehicle.groupBy({ by: ['status'], where: { organizationId: req.user.organizationId }, _count: true }), db.driver.groupBy({ by: ['status'], where: { organizationId: req.user.organizationId }, _count: true }), db.trip.groupBy({ by: ['status'], where: { organizationId: req.user.organizationId }, _count: true }),
-        db.trip.findMany({ where: { organizationId: req.user.organizationId }, take: 6, orderBy: { createdAt: 'desc' }, include: { vehicle: true, driver: true } })
+        showRecentTrips ? db.trip.findMany({ where: { organizationId: req.user.organizationId }, take: 6, orderBy: { createdAt: 'desc' }, select: { id: true, tripNo: true, source: true, destination: true, status: true, vehicle: { select: { name: true } }, driver: { select: { name: true } } } }) : Promise.resolve([])
     ]);
     const vc = Object.fromEntries(vehicles.map(x => [x.status, x._count]));
     const dc = Object.fromEntries(drivers.map(x => [x.status, x._count]));
@@ -149,8 +161,69 @@ app.put('/api/drivers/:id', allow(client_1.Role.FLEET_MANAGER, client_1.Role.SAF
     throw Object.assign(new Error('Driver not found'), { status: 404 }); res.json(await db.driver.update({ where: { id: row.id }, data: parse(driverSchema.partial(), req.body) })); }));
 app.delete('/api/drivers/:id', allow(client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => { const row = await db.driver.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId } }); if (!row)
     throw Object.assign(new Error('Driver not found'), { status: 404 }); await db.driver.delete({ where: { id: row.id } }); res.status(204).end(); }));
-const tripSchema = zod_1.z.object({ source: zod_1.z.string().min(2), destination: zod_1.z.string().min(2), vehicleId: zod_1.z.string(), driverId: zod_1.z.string(), cargoWeightKg: zod_1.z.coerce.number().positive(), plannedDistanceKm: zod_1.z.coerce.number().positive(), revenue: zod_1.z.coerce.number().nonnegative().default(0) });
+const tripSchema = zod_1.z.object({ source: zod_1.z.string().min(2), destination: zod_1.z.string().min(2), vehicleId: zod_1.z.string(), driverId: zod_1.z.string(), cargoWeightKg: zod_1.z.coerce.number().positive(), plannedDistanceKm: zod_1.z.coerce.number().positive(), revenue: zod_1.z.coerce.number().nonnegative().default(0), estimatedTollsInr: zod_1.z.union([zod_1.z.null(), zod_1.z.coerce.number().nonnegative()]).optional().default(null), estimatedDurationMin: zod_1.z.coerce.number().int().positive().optional(), routeSummary: zod_1.z.string().max(300).optional(), routeProvider: zod_1.z.enum(['GOOGLE', 'VALHALLA']).optional(), tollEstimateStatus: zod_1.z.enum(['ESTIMATED', 'HISTORICAL_ESTIMATE', 'NO_TOLLS_EXPECTED', 'TOLLS_PRESENT_PRICE_UNKNOWN', 'UNAVAILABLE']).optional(), routeEstimatedAt: zod_1.z.coerce.date().optional() });
 app.get('/api/trips', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => res.json(await db.trip.findMany({ where: { organizationId: req.user.organizationId }, include: { vehicle: true, driver: true }, orderBy: { createdAt: 'desc' } }))));
+const placeSchema = zod_1.z.object({ id: zod_1.z.string().min(1), name: zod_1.z.string().min(1), label: zod_1.z.string().min(1), city: zod_1.z.string().optional(), state: zod_1.z.string(), latitude: zod_1.z.number().finite().min(-90).max(90), longitude: zod_1.z.number().finite().min(-180).max(180), provider: zod_1.z.enum(['GOOGLE', 'PHOTON', 'BUILT_IN']) });
+app.get('/api/places/search', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => res.json(await (0, routePlanning_1.searchPlaces)(String(req.query.q || '')))));
+app.post('/api/routes/estimate', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => {
+    const { source, destination, vehicleId } = parse(zod_1.z.object({ source: placeSchema, destination: placeSchema, vehicleId: zod_1.z.string().min(1) }), req.body);
+    const organizationId = req.user.organizationId;
+    const vehicle = await db.vehicle.findFirst({ where: { id: vehicleId, organizationId }, select: { id: true, type: true, capacityKg: true } });
+    if (!vehicle)
+        throw Object.assign(new Error('Vehicle not found'), { status: 404 });
+    const routes = await (0, routePlanning_1.estimateRoutes)(source, destination);
+    if (routes.options.some(option => option.estimatedToll === null)) {
+        const [historyTrips, tollExpenses] = await Promise.all([
+            db.trip.findMany({ where: { organizationId, status: { in: [client_1.TripStatus.COMPLETED, client_1.TripStatus.DISPATCHED] } }, select: { id: true, vehicleId: true, source: true, destination: true, plannedDistanceKm: true, createdAt: true, dispatchedAt: true, completedAt: true, estimatedTollsInr: true, vehicle: { select: { type: true, capacityKg: true } } }, orderBy: { createdAt: 'desc' }, take: 100 }),
+            db.expense.findMany({ where: { organizationId, type: 'TOLL' }, select: { vehicleId: true, amount: true, date: true }, orderBy: { date: 'desc' }, take: 250 })
+        ]);
+        const observations = (0, historicalTollEstimate_1.buildHistoricalTollObservations)(historyTrips.map(trip => ({ id: trip.id, vehicleId: trip.vehicleId, vehicleType: trip.vehicle.type, vehicleCapacityKg: trip.vehicle.capacityKg, source: trip.source, destination: trip.destination, distanceKm: trip.plannedDistanceKm, createdAt: trip.createdAt, dispatchedAt: trip.dispatchedAt, completedAt: trip.completedAt, providerEstimatedTollInr: trip.estimatedTollsInr })), tollExpenses.map(expense => ({ vehicleId: expense.vehicleId, amountInr: expense.amount, date: expense.date })));
+        const vehicleClass = (0, historicalTollEstimate_1.resolveTollVehicleClass)(vehicle.type, vehicle.capacityKg);
+        routes.options = routes.options.map(option => {
+            if (option.estimatedToll !== null)
+                return option;
+            const estimate = (0, historicalTollEstimate_1.estimateHistoricalToll)({ source: source, destination: destination, distanceKm: option.distanceKm, vehicleClass, observations });
+            return estimate ? { ...option, estimatedToll: estimate.estimatedTollInr, tollEstimateStatus: 'HISTORICAL_ESTIMATE', tollEstimateSource: estimate.source, tollConfidence: estimate.confidence, tollSampleSize: estimate.sampleSize, tollEstimatedAt: estimate.asOf } : option;
+        });
+    }
+    res.json(routes);
+}));
+const profitabilityPreviewSchema = zod_1.z.object({ vehicleId: zod_1.z.string().min(1), plannedDistanceKm: zod_1.z.coerce.number().positive(), revenue: zod_1.z.coerce.number().nonnegative(), estimatedTollsInr: zod_1.z.union([zod_1.z.null(), zod_1.z.coerce.number().nonnegative()]).default(null) });
+async function estimateTripProfitability(organizationId, data) {
+    const vehicle = await db.vehicle.findFirst({ where: { id: data.vehicleId, organizationId }, select: { id: true, type: true, acquisitionCost: true } });
+    if (!vehicle)
+        throw Object.assign(new Error('Vehicle not found'), { status: 404 });
+    const [maintenance, distance, recentFuelLogs, completedFuelTrips] = await Promise.all([
+        db.maintenance.aggregate({ where: { organizationId, vehicleId: vehicle.id, status: client_1.MaintenanceStatus.CLOSED }, _sum: { cost: true } }),
+        db.trip.aggregate({ where: { organizationId, vehicleId: vehicle.id, status: client_1.TripStatus.COMPLETED }, _sum: { plannedDistanceKm: true } }),
+        db.fuelLog.findMany({ where: { organizationId, vehicleId: vehicle.id, liters: { gt: 0 }, cost: { gt: 0 } }, select: { liters: true, cost: true, date: true }, orderBy: { date: 'desc' }, take: 5 }),
+        db.trip.findMany({ where: { organizationId, vehicleId: vehicle.id, status: client_1.TripStatus.COMPLETED, fuelConsumedL: { gt: 0 } }, select: { plannedDistanceKm: true, fuelConsumedL: true }, orderBy: { completedAt: 'desc' }, take: 10 })
+    ]);
+    const fuelPrediction = (0, tripProfitability_1.buildFuelPrediction)(recentFuelLogs, completedFuelTrips.map(trip => ({ distanceKm: trip.plannedDistanceKm, fuelConsumedL: trip.fuelConsumedL })));
+    return (0, tripProfitability_1.calculateTripProfitability)({
+        revenueInr: data.revenue,
+        plannedDistanceKm: data.plannedDistanceKm,
+        estimatedTollsInr: data.estimatedTollsInr,
+        vehicleType: vehicle.type,
+        vehicleAcquisitionCostInr: vehicle.acquisitionCost,
+        historicalMaintenanceCostInr: maintenance._sum.cost || 0,
+        historicalCompletedDistanceKm: distance._sum.plannedDistanceKm || 0,
+        fuelPrediction,
+        config: tripProfitabilityConfig
+    });
+}
+app.post('/api/trips/profitability-estimate', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => {
+    const data = parse(profitabilityPreviewSchema, req.body);
+    res.json(await estimateTripProfitability(req.user.organizationId, data));
+}));
+app.get('/api/trips/:id/profitability-estimate', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => {
+    const trip = await db.trip.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId } });
+    if (!trip)
+        throw Object.assign(new Error('Trip not found'), { status: 404 });
+    if (trip.status !== client_1.TripStatus.DRAFT)
+        throw Object.assign(new Error('Profitability is reviewed before a draft is dispatched'), { status: 409 });
+    res.json(await estimateTripProfitability(req.user.organizationId, { vehicleId: trip.vehicleId, plannedDistanceKm: trip.plannedDistanceKm, revenue: trip.revenue, estimatedTollsInr: trip.estimatedTollsInr }));
+}));
 async function getAssignmentContext(organizationId, vehicleId, driverId) {
     const [vehicle, driver, vehicleTrip, driverTrip, maintenance] = await Promise.all([
         db.vehicle.findFirst({ where: { id: vehicleId, organizationId } }),
@@ -228,8 +301,9 @@ async function analytics(organizationId) {
     const byVehicle = vehicles.map(v => { const vf = fuel.filter(x => x.vehicleId === v.id).reduce((s, x) => s + x.cost, 0), vm = maintenance.filter(x => x.vehicleId === v.id).reduce((s, x) => s + x.cost, 0), ve = expenses.filter(x => x.vehicleId === v.id).reduce((s, x) => s + x.amount, 0), vr = trips.filter(x => x.vehicleId === v.id).reduce((s, x) => s + x.revenue, 0); return { id: v.id, name: v.name, registrationNo: v.registrationNo, operationalCost: vf + vm + ve, roi: v.acquisitionCost ? ((vr - vf - vm) / v.acquisitionCost) * 100 : 0 }; });
     return { summary: { fuelEfficiency: liters ? distance / liters : 0, fleetUtilization: active ? vehicles.filter(x => x.status === client_1.VehicleStatus.ON_TRIP).length / active * 100 : 0, operationalCost: totalFuel + totalMaintenance + totalOther, vehicleRoi: acquisition ? (revenue - totalFuel - totalMaintenance) / acquisition * 100 : 0 }, byVehicle };
 }
-app.get('/api/analytics', allow(), asyncRoute(async (req, res) => res.json(await analytics(req.user.organizationId))));
-app.get('/api/analytics/export.csv', asyncRoute(async (req, res) => { const a = await analytics(req.user.organizationId); const csv = ['Vehicle,Registration,Operational Cost,ROI %', ...a.byVehicle.map(x => `"${x.name}","${x.registrationNo}",${x.operationalCost.toFixed(2)},${x.roi.toFixed(2)}`)].join('\n'); res.type('text/csv').attachment('fleetpilot-analytics.csv').send(csv); }));
+const allowFinancialAnalytics = (req, res, next) => (0, security_1.disclosurePolicyForRole)(req.user.role).financialAnalytics ? next() : res.status(403).json({ message: 'You do not have permission to view financial analytics' });
+app.get('/api/analytics', allowFinancialAnalytics, asyncRoute(async (req, res) => res.json(await analytics(req.user.organizationId))));
+app.get('/api/analytics/export.csv', allowFinancialAnalytics, asyncRoute(async (req, res) => { const a = await analytics(req.user.organizationId); const csv = ['Vehicle,Registration,Operational Cost,ROI %', ...a.byVehicle.map(x => `"${x.name}","${x.registrationNo}",${x.operationalCost.toFixed(2)},${x.roi.toFixed(2)}`)].join('\n'); res.type('text/csv').attachment('fleetpilot-analytics.csv').send(csv); }));
 app.use((err, _req, res, _next) => { console.error(err); if (err instanceof assignmentEligibility_1.AssignmentEligibilityError)
     return res.status(err.status).json({ code: err.code, message: err.message, reasons: err.reasons }); if (err instanceof client_1.Prisma.PrismaClientKnownRequestError) {
     if (err.code === 'P2002')

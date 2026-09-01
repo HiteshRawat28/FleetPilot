@@ -41,6 +41,14 @@ ALTER TABLE "User"
 ALTER TABLE "Vehicle" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
 ALTER TABLE "Driver" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
 ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
+ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "estimatedTollsInr" DOUBLE PRECISION;
+ALTER TABLE "Trip" ALTER COLUMN "estimatedTollsInr" DROP DEFAULT;
+ALTER TABLE "Trip" ALTER COLUMN "estimatedTollsInr" DROP NOT NULL;
+ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "estimatedDurationMin" INTEGER;
+ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "routeSummary" TEXT;
+ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "routeProvider" TEXT;
+ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "tollEstimateStatus" TEXT;
+ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "routeEstimatedAt" TIMESTAMP(3);
 ALTER TABLE "Maintenance" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
 ALTER TABLE "FuelLog" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
 ALTER TABLE "Expense" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
@@ -122,6 +130,40 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Expense_organizationId_fkey') THEN
     ALTER TABLE "Expense" ADD CONSTRAINT "Expense_organizationId_fkey"
       FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS "CopilotAction" (
+  "id" TEXT NOT NULL,
+  "organizationId" TEXT NOT NULL,
+  "userId" TEXT NOT NULL,
+  "type" TEXT NOT NULL,
+  "status" TEXT NOT NULL,
+  "idempotencyKey" TEXT NOT NULL,
+  "request" JSONB NOT NULL,
+  "result" JSONB,
+  "tripId" TEXT,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "CopilotAction_pkey" PRIMARY KEY ("id")
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "CopilotAction_organizationId_idempotencyKey_key"
+  ON "CopilotAction"("organizationId", "idempotencyKey");
+CREATE INDEX IF NOT EXISTS "CopilotAction_organizationId_createdAt_idx"
+  ON "CopilotAction"("organizationId", "createdAt");
+CREATE INDEX IF NOT EXISTS "CopilotAction_userId_idx" ON "CopilotAction"("userId");
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CopilotAction_organizationId_fkey') THEN
+    ALTER TABLE "CopilotAction" ADD CONSTRAINT "CopilotAction_organizationId_fkey"
+      FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CopilotAction_userId_fkey') THEN
+    ALTER TABLE "CopilotAction" ADD CONSTRAINT "CopilotAction_userId_fkey"
+      FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CopilotAction_tripId_fkey') THEN
+    ALTER TABLE "CopilotAction" ADD CONSTRAINT "CopilotAction_tripId_fkey"
+      FOREIGN KEY ("tripId") REFERENCES "Trip"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
 END $$;
 

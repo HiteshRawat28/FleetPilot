@@ -30,6 +30,7 @@ Most read endpoints currently allow every authenticated role. Finance and analyt
 - Fuel and categorized expense capture.
 - Fleet analytics, per-vehicle cost/ROI display, and CSV export.
 - Responsive layouts for desktop, tablet, and mobile.
+- Role-scoped FleetPilot Copilot with current-data evidence, assignment recommendations, operational-risk summaries, and explicitly confirmed draft-trip creation.
 
 ## Core product rules
 
@@ -41,6 +42,7 @@ Most read endpoints currently allow every authenticated role. Finance and analyt
 - Only draft trips can dispatch; only dispatched trips can complete.
 - Dispatch, completion, cancellation, and maintenance operations must keep related resource states consistent.
 - Server authorization and validation remain authoritative even when the UI pre-validates a form.
+- Copilot may create only a draft trip, and only for an organization `OWNER` or `ADMIN`, after showing an explicit confirmation preview; confirmation must revalidate authorization and assignment state and must be idempotent and auditable.
 
 ## Assignment failure contract
 
@@ -59,6 +61,7 @@ Most read endpoints currently allow every authenticated role. Finance and analyt
 - Orders/customers, proof of delivery, invoicing, payroll, or a driver mobile app.
 - User provisioning, multi-tenant organizations, editable RBAC, or persisted organization settings.
 - Full audit history, financial ledger corrections, or production accounting.
+- Copilot dispatch, completion, cancellation, maintenance actions, finance writes, record edits/deletes, autonomous execution, and proactive notifications.
 
 ## Important open decisions
 
