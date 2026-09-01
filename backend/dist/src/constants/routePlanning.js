@@ -120,12 +120,12 @@ async function googleRoutes(from, to, avoidTolls = false) {
         return [];
     const configuredTollPass = process.env.ROUTE_TOLL_PASS?.trim();
     const routeModifiers = { avoidTolls, ...(configuredTollPass ? { tollPasses: [configuredTollPass] } : {}) };
-    const response = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.description,routes.travelAdvisory.tollInfo' }, body: JSON.stringify({ origin: { location: { latLng: { latitude: from.latitude, longitude: from.longitude } } }, destination: { location: { latLng: { latitude: to.latitude, longitude: to.longitude } } }, travelMode: 'DRIVE', routingPreference: 'TRAFFIC_UNAWARE', computeAlternativeRoutes: !avoidTolls, extraComputations: ['TOLLS'], routeModifiers }), signal: AbortSignal.timeout(6500) });
+    const response = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.description,routes.polyline.encodedPolyline,routes.travelAdvisory.tollInfo' }, body: JSON.stringify({ origin: { location: { latLng: { latitude: from.latitude, longitude: from.longitude } } }, destination: { location: { latLng: { latitude: to.latitude, longitude: to.longitude } } }, travelMode: 'DRIVE', routingPreference: 'TRAFFIC_AWARE', computeAlternativeRoutes: !avoidTolls, extraComputations: ['TOLLS'], routeModifiers }), signal: AbortSignal.timeout(6500) });
     if (!response.ok)
         return [];
     const result = await response.json();
     return (result.routes || []).flatMap(route => { if (!route.distanceMeters || !route.duration)
-        return []; const toll = parseGoogleTollInfo(route.travelAdvisory?.tollInfo); return [{ distanceKm: route.distanceMeters / 1000, durationMinutes: Number.parseFloat(route.duration) / 60, via: route.description || 'Google recommended roads', provider: 'GOOGLE', ...toll }]; });
+        return []; const toll = parseGoogleTollInfo(route.travelAdvisory?.tollInfo); return [{ distanceKm: route.distanceMeters / 1000, durationMinutes: Number.parseFloat(route.duration) / 60, via: route.description || 'Google recommended roads', provider: 'GOOGLE', polyline: route.polyline?.encodedPolyline, ...toll }]; });
 }
 async function valhallaRoute(from, to, mode) {
     const costingOptions = mode === 'shortest' ? { shortest: true } : mode === 'toll-saver' ? { use_tolls: 0.1, use_highways: 0.65 } : {};
@@ -169,7 +169,7 @@ async function estimateRoutes(source, destination) {
     shortest = shortest || available.slice().sort((a, b) => a.distanceKm - b.distanceKm)[0];
     fastest = fastest || available.slice().sort((a, b) => a.durationMinutes - b.durationMinutes)[0];
     tollSaver = tollSaver || shortest;
-    const option = (strategy, label, route, recommended = false) => ({ id: strategy, label, strategy, recommended, distanceKm: Math.round(route.distanceKm), durationMinutes: Math.max(15, Math.round(route.durationMinutes)), estimatedToll: route.estimatedToll, tollEstimateStatus: route.tollEstimateStatus, tollEstimateSource: route.estimatedToll === null ? 'UNAVAILABLE' : 'PROVIDER', tollConfidence: null, tollSampleSize: 0, tollEstimatedAt: null, via: route.via, provider: route.provider });
+    const option = (strategy, label, route, recommended = false) => ({ id: strategy, label, strategy, recommended, distanceKm: Math.round(route.distanceKm), durationMinutes: Math.max(15, Math.round(route.durationMinutes)), estimatedToll: route.estimatedToll, tollEstimateStatus: route.tollEstimateStatus, tollEstimateSource: route.estimatedToll === null ? 'UNAVAILABLE' : 'PROVIDER', tollConfidence: null, tollSampleSize: 0, tollEstimatedAt: null, via: route.via, provider: route.provider, polyline: route.polyline });
     const tollSaverLabel = tollSaver.estimatedToll === null ? 'Toll-avoidance route' : 'Lower-toll route';
     const sameRoute = (left, right) => Math.abs(left.distanceKm - right.distanceKm) < .1 && Math.abs(left.durationMinutes - right.durationMinutes) < 1;
     const shortestIsFastest = sameRoute(shortest, fastest);

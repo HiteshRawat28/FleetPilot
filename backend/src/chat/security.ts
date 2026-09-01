@@ -13,7 +13,8 @@ const policies:Record<Role,CopilotDisclosurePolicy>={
   FLEET_MANAGER:{recentTripDetails:true,driverLicenseNumbers:true,tripRevenue:true,financialAnalytics:true},
   DISPATCHER:{recentTripDetails:true,driverLicenseNumbers:false,tripRevenue:false,financialAnalytics:false},
   SAFETY_OFFICER:{recentTripDetails:false,driverLicenseNumbers:true,tripRevenue:false,financialAnalytics:false},
-  FINANCIAL_ANALYST:{recentTripDetails:false,driverLicenseNumbers:false,tripRevenue:false,financialAnalytics:true}
+  FINANCIAL_ANALYST:{recentTripDetails:false,driverLicenseNumbers:false,tripRevenue:false,financialAnalytics:true},
+  DRIVER:{recentTripDetails:false,driverLicenseNumbers:false,tripRevenue:false,financialAnalytics:false}
 };
 
 export function disclosurePolicyForRole(role:Role){return policies[role]}

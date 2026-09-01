@@ -5,6 +5,15 @@
 -- be used by later statements.
 ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'OWNER';
 ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'ADMIN';
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'LicenseCategory') THEN
+    CREATE TYPE "LicenseCategory" AS ENUM ('LMV', 'HMV');
+  ELSE
+    ALTER TYPE "LicenseCategory" ADD VALUE IF NOT EXISTS 'LMV';
+    ALTER TYPE "LicenseCategory" ADD VALUE IF NOT EXISTS 'HMV';
+  END IF;
+END $$;
 COMMIT;
 
 BEGIN;
@@ -52,6 +61,8 @@ ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "routeEstimatedAt" TIMESTAMP(3);
 ALTER TABLE "Maintenance" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
 ALTER TABLE "FuelLog" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
 ALTER TABLE "Expense" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
+ALTER TABLE "Vehicle"
+  ADD COLUMN IF NOT EXISTS "requiredLicenseCategory" "LicenseCategory" NOT NULL DEFAULT 'LMV';
 
 UPDATE "User" SET "organizationId" = 'legacy-organization' WHERE "organizationId" IS NULL;
 UPDATE "Vehicle" SET "organizationId" = 'legacy-organization' WHERE "organizationId" IS NULL;

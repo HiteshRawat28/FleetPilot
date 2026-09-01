@@ -1,11 +1,11 @@
 export const API_URL=import.meta.env.VITE_API_URL||'http://localhost:4000/api';
-export type Role='OWNER'|'ADMIN'|'FLEET_MANAGER'|'DISPATCHER'|'SAFETY_OFFICER'|'FINANCIAL_ANALYST';
-export type User={id:string;name:string;email:string;role:Role;organizationId:string;organizationName:string};
+export type Role='OWNER'|'ADMIN'|'FLEET_MANAGER'|'DISPATCHER'|'SAFETY_OFFICER'|'FINANCIAL_ANALYST'|'DRIVER';
+export type User={id:string;name:string;email:string;role:Role;organizationId:string;organizationName:string;mustChangePassword?:boolean;driverId?:string;onboardingStatus?:string};
 export type ApiFailureReason={code:string;message:string;field?:string;details?:Record<string,string|number>};
 export class ApiError extends Error{
   constructor(message:string,readonly status:number,readonly code?:string,readonly reasons:ApiFailureReason[]=[]){super(message);this.name='ApiError'}
 }
-export const roleLabel:Record<Role,string>={OWNER:'Company Owner',ADMIN:'Administrator',FLEET_MANAGER:'Fleet Manager',DISPATCHER:'Dispatcher',SAFETY_OFFICER:'Safety Officer',FINANCIAL_ANALYST:'Financial Analyst'};
+export const roleLabel:Record<Role,string>={OWNER:'Company Owner',ADMIN:'Administrator',FLEET_MANAGER:'Fleet Manager',DISPATCHER:'Dispatcher',SAFETY_OFFICER:'Safety Officer',FINANCIAL_ANALYST:'Financial Analyst',DRIVER:'Driver'};
 localStorage.removeItem('transitops_token');
 export function clearClientSession(){localStorage.removeItem('transitops_token');for(let index=sessionStorage.length-1;index>=0;index--){const key=sessionStorage.key(index);if(key?.startsWith('fleetpilot_copilot_'))sessionStorage.removeItem(key)}}
 export async function api<T=any>(path:string,options:RequestInit={}):Promise<T>{

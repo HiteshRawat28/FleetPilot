@@ -12,7 +12,8 @@ const policies = {
     FLEET_MANAGER: { recentTripDetails: true, driverLicenseNumbers: true, tripRevenue: true, financialAnalytics: true },
     DISPATCHER: { recentTripDetails: true, driverLicenseNumbers: false, tripRevenue: false, financialAnalytics: false },
     SAFETY_OFFICER: { recentTripDetails: false, driverLicenseNumbers: true, tripRevenue: false, financialAnalytics: false },
-    FINANCIAL_ANALYST: { recentTripDetails: false, driverLicenseNumbers: false, tripRevenue: false, financialAnalytics: true }
+    FINANCIAL_ANALYST: { recentTripDetails: false, driverLicenseNumbers: false, tripRevenue: false, financialAnalytics: true },
+    DRIVER: { recentTripDetails: false, driverLicenseNumbers: false, tripRevenue: false, financialAnalytics: false }
 };
 function disclosurePolicyForRole(role) { return policies[role]; }
 function vehicleForCopilot(vehicle) { return { name: vehicle.name, registrationNo: vehicle.registrationNo, type: vehicle.type, status: vehicle.status, capacityKg: vehicle.capacityKg, requiredLicenseCategory: vehicle.requiredLicenseCategory, region: vehicle.region, odometerKm: vehicle.odometerKm }; }

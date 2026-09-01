@@ -27,6 +27,7 @@ export type RouteOption = {
   via: string;
   provider: 'GOOGLE' | 'VALHALLA' | 'ESTIMATED';
   recommended: boolean;
+  polyline?: string;
 };
 
 type BuiltInCity = Omit<Place, 'label' | 'provider'>;
@@ -117,7 +118,7 @@ export function parseGoogleTollInfo(tollInfo?:GoogleTollInfo):{estimatedToll:num
   if(!Number.isFinite(units)||!Number.isFinite(nanos))return {estimatedToll:null,tollEstimateStatus:'TOLLS_PRESENT_PRICE_UNKNOWN'};
   return {estimatedToll:Math.round((units+nanos/1_000_000_000)*100)/100,tollEstimateStatus:'ESTIMATED'};
 }
-type RoadRoute={distanceKm:number;durationMinutes:number;via:string;provider:'GOOGLE'|'VALHALLA';estimatedToll:number|null;tollEstimateStatus:TollEstimateStatus};
+type RoadRoute={distanceKm:number;durationMinutes:number;via:string;provider:'GOOGLE'|'VALHALLA';estimatedToll:number|null;tollEstimateStatus:TollEstimateStatus;polyline?:string};
 
 export function rankRouteMetrics<T extends {distanceKm:number;durationMinutes:number}>(routes:T[]){
   if(!routes.length)throw new RangeError('At least one route is required');
@@ -131,9 +132,9 @@ async function googleRoutes(from:Place,to:Place,avoidTolls=false):Promise<RoadRo
   const key=mapsKey();if(!key)return [];
   const configuredTollPass=process.env.ROUTE_TOLL_PASS?.trim();
   const routeModifiers={avoidTolls,...(configuredTollPass?{tollPasses:[configuredTollPass]}:{})};
-  const response=await fetch('https://routes.googleapis.com/directions/v2:computeRoutes',{method:'POST',headers:{'Content-Type':'application/json','X-Goog-Api-Key':key,'X-Goog-FieldMask':'routes.distanceMeters,routes.duration,routes.description,routes.travelAdvisory.tollInfo'},body:JSON.stringify({origin:{location:{latLng:{latitude:from.latitude,longitude:from.longitude}}},destination:{location:{latLng:{latitude:to.latitude,longitude:to.longitude}}},travelMode:'DRIVE',routingPreference:'TRAFFIC_UNAWARE',computeAlternativeRoutes:!avoidTolls,extraComputations:['TOLLS'],routeModifiers}),signal:AbortSignal.timeout(6500)});if(!response.ok)return [];
-  const result=await response.json() as {routes?:Array<{distanceMeters?:number;duration?:string;description?:string;travelAdvisory?:{tollInfo?:GoogleTollInfo}}>};
-  return (result.routes||[]).flatMap(route=>{if(!route.distanceMeters||!route.duration)return [];const toll=parseGoogleTollInfo(route.travelAdvisory?.tollInfo);return [{distanceKm:route.distanceMeters/1000,durationMinutes:Number.parseFloat(route.duration)/60,via:route.description||'Google recommended roads',provider:'GOOGLE' as const,...toll}]});
+  const response=await fetch('https://routes.googleapis.com/directions/v2:computeRoutes',{method:'POST',headers:{'Content-Type':'application/json','X-Goog-Api-Key':key,'X-Goog-FieldMask':'routes.distanceMeters,routes.duration,routes.description,routes.polyline.encodedPolyline,routes.travelAdvisory.tollInfo'},body:JSON.stringify({origin:{location:{latLng:{latitude:from.latitude,longitude:from.longitude}}},destination:{location:{latLng:{latitude:to.latitude,longitude:to.longitude}}},travelMode:'DRIVE',routingPreference:'TRAFFIC_AWARE',computeAlternativeRoutes:!avoidTolls,extraComputations:['TOLLS'],routeModifiers}),signal:AbortSignal.timeout(6500)});if(!response.ok)return [];
+  const result=await response.json() as {routes?:Array<{distanceMeters?:number;duration?:string;description?:string;polyline?:{encodedPolyline?:string};travelAdvisory?:{tollInfo?:GoogleTollInfo}}>};
+  return (result.routes||[]).flatMap(route=>{if(!route.distanceMeters||!route.duration)return [];const toll=parseGoogleTollInfo(route.travelAdvisory?.tollInfo);return [{distanceKm:route.distanceMeters/1000,durationMinutes:Number.parseFloat(route.duration)/60,via:route.description||'Google recommended roads',provider:'GOOGLE' as const,polyline:route.polyline?.encodedPolyline,...toll}]});
 }
 
 async function valhallaRoute(from:Place,to:Place,mode:'shortest'|'fastest'|'toll-saver'):Promise<RoadRoute|null>{
@@ -150,7 +151,7 @@ export async function estimateRoutes(source:Place,destination:Place){
   const available=[shortest,fastest,tollSaver].filter((route):route is RoadRoute=>Boolean(route));
   if(!available.length)throw Object.assign(new Error('A verified road route is temporarily unavailable. Please try again instead of using an unverified estimate.'),{status:503});
   shortest=shortest||available.slice().sort((a,b)=>a.distanceKm-b.distanceKm)[0];fastest=fastest||available.slice().sort((a,b)=>a.durationMinutes-b.durationMinutes)[0];tollSaver=tollSaver||shortest;
-  const option=(strategy:RouteStrategy,label:string,route:RoadRoute,recommended=false):RouteOption=>({id:strategy,label,strategy,recommended,distanceKm:Math.round(route.distanceKm),durationMinutes:Math.max(15,Math.round(route.durationMinutes)),estimatedToll:route.estimatedToll,tollEstimateStatus:route.tollEstimateStatus,tollEstimateSource:route.estimatedToll===null?'UNAVAILABLE':'PROVIDER',tollConfidence:null,tollSampleSize:0,tollEstimatedAt:null,via:route.via,provider:route.provider});
+  const option=(strategy:RouteStrategy,label:string,route:RoadRoute,recommended=false):RouteOption=>({id:strategy,label,strategy,recommended,distanceKm:Math.round(route.distanceKm),durationMinutes:Math.max(15,Math.round(route.durationMinutes)),estimatedToll:route.estimatedToll,tollEstimateStatus:route.tollEstimateStatus,tollEstimateSource:route.estimatedToll===null?'UNAVAILABLE':'PROVIDER',tollConfidence:null,tollSampleSize:0,tollEstimatedAt:null,via:route.via,provider:route.provider,polyline:route.polyline});
   const tollSaverLabel=tollSaver.estimatedToll===null?'Toll-avoidance route':'Lower-toll route';
   const sameRoute=(left:RoadRoute,right:RoadRoute)=>Math.abs(left.distanceKm-right.distanceKm)<.1&&Math.abs(left.durationMinutes-right.durationMinutes)<1;
   const shortestIsFastest=sameRoute(shortest,fastest);
