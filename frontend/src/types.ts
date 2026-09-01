@@ -126,7 +126,7 @@ export type RouteOption = {
   tollSampleSize: number;
   tollEstimatedAt: string | null;
   via: string;
-  provider: "GOOGLE" | "VALHALLA";
+  provider: "GOOGLE" | "VALHALLA" | "ESTIMATED";
   recommended: boolean;
 };
 export type RouteEstimateResponse = {
@@ -163,7 +163,7 @@ export type Trip = {
   estimatedTollsInr: number | null;
   estimatedDurationMin?: number;
   routeSummary?: string;
-  routeProvider?: "GOOGLE" | "VALHALLA";
+  routeProvider?: "GOOGLE" | "VALHALLA" | "ESTIMATED";
   tollEstimateStatus?: TollEstimateStatus;
   routeEstimatedAt?: string;
   status: "DRAFT" | "DISPATCHED" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED";

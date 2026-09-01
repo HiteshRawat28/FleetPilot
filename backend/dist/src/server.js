@@ -1774,7 +1774,7 @@ const tripSchema = zod_1.z.object({
         .default(null),
     estimatedDurationMin: zod_1.z.coerce.number().int().positive().optional(),
     routeSummary: zod_1.z.string().max(300).optional(),
-    routeProvider: zod_1.z.enum(["GOOGLE", "VALHALLA"]).optional(),
+    routeProvider: zod_1.z.enum(["GOOGLE", "VALHALLA", "ESTIMATED"]).optional(),
     tollEstimateStatus: zod_1.z
         .enum([
         "ESTIMATED",

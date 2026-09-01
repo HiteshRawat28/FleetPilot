@@ -4,6 +4,7 @@ exports.INDIAN_CITIES = void 0;
 exports.searchPlaces = searchPlaces;
 exports.parseGoogleTollInfo = parseGoogleTollInfo;
 exports.rankRouteMetrics = rankRouteMetrics;
+exports.fallbackEstimatedRoute = fallbackEstimatedRoute;
 exports.estimateRoutes = estimateRoutes;
 exports.INDIAN_CITIES = [
     { id: 'ahmedabad', name: 'Ahmedabad', state: 'Gujarat', latitude: 23.0225, longitude: 72.5714 },
@@ -114,6 +115,19 @@ function rankRouteMetrics(routes) {
         fastest: routes.slice().sort((a, b) => a.durationMinutes - b.durationMinutes)[0]
     };
 }
+function fallbackEstimatedRoute(source, destination) {
+    const airDistanceKm = haversineKm(source, destination);
+    const roadDistanceKm = Math.max(1, airDistanceKm * 1.28);
+    const averageFreightSpeedKph = 48;
+    return {
+        distanceKm: roadDistanceKm,
+        durationMinutes: Math.max(15, (roadDistanceKm / averageFreightSpeedKph) * 60),
+        via: 'Coordinate-based fallback estimate',
+        provider: 'ESTIMATED',
+        estimatedToll: null,
+        tollEstimateStatus: 'UNAVAILABLE'
+    };
+}
 async function googleRoutes(from, to, avoidTolls = false) {
     const key = mapsKey();
     if (!key)
@@ -164,11 +178,17 @@ async function estimateRoutes(source, destination) {
         tollSaver = requestedTollSaver || shortest;
     }
     const available = [shortest, fastest, tollSaver].filter((route) => Boolean(route));
-    if (!available.length)
-        throw Object.assign(new Error('A verified road route is temporarily unavailable. Please try again instead of using an unverified estimate.'), { status: 503 });
-    shortest = shortest || available.slice().sort((a, b) => a.distanceKm - b.distanceKm)[0];
-    fastest = fastest || available.slice().sort((a, b) => a.durationMinutes - b.durationMinutes)[0];
-    tollSaver = tollSaver || shortest;
+    if (!available.length) {
+        const fallback = fallbackEstimatedRoute(source, destination);
+        shortest = fallback;
+        fastest = fallback;
+        tollSaver = fallback;
+    }
+    else {
+        shortest = shortest || available.slice().sort((a, b) => a.distanceKm - b.distanceKm)[0];
+        fastest = fastest || available.slice().sort((a, b) => a.durationMinutes - b.durationMinutes)[0];
+        tollSaver = tollSaver || shortest;
+    }
     const option = (strategy, label, route, recommended = false) => ({ id: strategy, label, strategy, recommended, distanceKm: Math.round(route.distanceKm), durationMinutes: Math.max(15, Math.round(route.durationMinutes)), estimatedToll: route.estimatedToll, tollEstimateStatus: route.tollEstimateStatus, tollEstimateSource: route.estimatedToll === null ? 'UNAVAILABLE' : 'PROVIDER', tollConfidence: null, tollSampleSize: 0, tollEstimatedAt: null, via: route.via, provider: route.provider, polyline: route.polyline });
     const tollSaverLabel = tollSaver.estimatedToll === null ? 'Toll-avoidance route' : 'Lower-toll route';
     const sameRoute = (left, right) => Math.abs(left.distanceKm - right.distanceKm) < .1 && Math.abs(left.durationMinutes - right.durationMinutes) < 1;

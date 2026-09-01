@@ -118,13 +118,27 @@ export function parseGoogleTollInfo(tollInfo?:GoogleTollInfo):{estimatedToll:num
   if(!Number.isFinite(units)||!Number.isFinite(nanos))return {estimatedToll:null,tollEstimateStatus:'TOLLS_PRESENT_PRICE_UNKNOWN'};
   return {estimatedToll:Math.round((units+nanos/1_000_000_000)*100)/100,tollEstimateStatus:'ESTIMATED'};
 }
-type RoadRoute={distanceKm:number;durationMinutes:number;via:string;provider:'GOOGLE'|'VALHALLA';estimatedToll:number|null;tollEstimateStatus:TollEstimateStatus;polyline?:string};
+type RoadRoute={distanceKm:number;durationMinutes:number;via:string;provider:'GOOGLE'|'VALHALLA'|'ESTIMATED';estimatedToll:number|null;tollEstimateStatus:TollEstimateStatus;polyline?:string};
 
 export function rankRouteMetrics<T extends {distanceKm:number;durationMinutes:number}>(routes:T[]){
   if(!routes.length)throw new RangeError('At least one route is required');
   return {
     shortest:routes.slice().sort((a,b)=>a.distanceKm-b.distanceKm)[0],
     fastest:routes.slice().sort((a,b)=>a.durationMinutes-b.durationMinutes)[0]
+  };
+}
+
+export function fallbackEstimatedRoute(source:Place,destination:Place):RoadRoute{
+  const airDistanceKm=haversineKm(source,destination);
+  const roadDistanceKm=Math.max(1,airDistanceKm*1.28);
+  const averageFreightSpeedKph=48;
+  return {
+    distanceKm:roadDistanceKm,
+    durationMinutes:Math.max(15,(roadDistanceKm/averageFreightSpeedKph)*60),
+    via:'Coordinate-based fallback estimate',
+    provider:'ESTIMATED',
+    estimatedToll:null,
+    tollEstimateStatus:'UNAVAILABLE'
   };
 }
 
@@ -149,8 +163,13 @@ export async function estimateRoutes(source:Place,destination:Place){
   const normalGoogle=await googleRoutes(source,destination);let shortest:RoadRoute|undefined,fastest:RoadRoute|undefined,tollSaver:RoadRoute|undefined;
   if(normalGoogle.length){({shortest,fastest}=rankRouteMetrics(normalGoogle));tollSaver=(await googleRoutes(source,destination,true))[0]||shortest}else{const [requestedShortest,requestedFastest,requestedTollSaver]=await Promise.all([valhallaRoute(source,destination,'shortest'),valhallaRoute(source,destination,'fastest'),valhallaRoute(source,destination,'toll-saver')]);const candidates=[requestedShortest,requestedFastest,requestedTollSaver].filter((route):route is RoadRoute=>Boolean(route));if(candidates.length)({shortest,fastest}=rankRouteMetrics(candidates));tollSaver=requestedTollSaver||shortest}
   const available=[shortest,fastest,tollSaver].filter((route):route is RoadRoute=>Boolean(route));
-  if(!available.length)throw Object.assign(new Error('A verified road route is temporarily unavailable. Please try again instead of using an unverified estimate.'),{status:503});
-  shortest=shortest||available.slice().sort((a,b)=>a.distanceKm-b.distanceKm)[0];fastest=fastest||available.slice().sort((a,b)=>a.durationMinutes-b.durationMinutes)[0];tollSaver=tollSaver||shortest;
+  if(!available.length){
+    const fallback=fallbackEstimatedRoute(source,destination);
+    shortest=fallback;fastest=fallback;tollSaver=fallback;
+  }
+  else{
+    shortest=shortest||available.slice().sort((a,b)=>a.distanceKm-b.distanceKm)[0];fastest=fastest||available.slice().sort((a,b)=>a.durationMinutes-b.durationMinutes)[0];tollSaver=tollSaver||shortest;
+  }
   const option=(strategy:RouteStrategy,label:string,route:RoadRoute,recommended=false):RouteOption=>({id:strategy,label,strategy,recommended,distanceKm:Math.round(route.distanceKm),durationMinutes:Math.max(15,Math.round(route.durationMinutes)),estimatedToll:route.estimatedToll,tollEstimateStatus:route.tollEstimateStatus,tollEstimateSource:route.estimatedToll===null?'UNAVAILABLE':'PROVIDER',tollConfidence:null,tollSampleSize:0,tollEstimatedAt:null,via:route.via,provider:route.provider,polyline:route.polyline});
   const tollSaverLabel=tollSaver.estimatedToll===null?'Toll-avoidance route':'Lower-toll route';
   const sameRoute=(left:RoadRoute,right:RoadRoute)=>Math.abs(left.distanceKm-right.distanceKm)<.1&&Math.abs(left.durationMinutes-right.durationMinutes)<1;
