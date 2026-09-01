@@ -12,12 +12,15 @@ const client_1 = require("@prisma/client");
 const zod_1 = require("zod");
 const google_auth_library_1 = require("google-auth-library");
 const assignmentEligibility_1 = require("./services/assignmentEligibility");
+<<<<<<< Updated upstream
 const tripProfitability_1 = require("./services/tripProfitability");
 const historicalTollEstimate_1 = require("./services/historicalTollEstimate");
 const routePlanning_1 = require("./constants/routePlanning");
 const chat_1 = require("./chat/chat");
 const security_1 = require("./chat/security");
 const session_1 = require("./auth/session");
+=======
+>>>>>>> Stashed changes
 const db = new client_1.PrismaClient();
 const app = (0, express_1.default)();
 const PORT = Number(process.env.PORT || 4000);
@@ -163,6 +166,7 @@ app.delete('/api/drivers/:id', allow(client_1.Role.FLEET_MANAGER), asyncRoute(as
     throw Object.assign(new Error('Driver not found'), { status: 404 }); await db.driver.delete({ where: { id: row.id } }); res.status(204).end(); }));
 const tripSchema = zod_1.z.object({ source: zod_1.z.string().min(2), destination: zod_1.z.string().min(2), vehicleId: zod_1.z.string(), driverId: zod_1.z.string(), cargoWeightKg: zod_1.z.coerce.number().positive(), plannedDistanceKm: zod_1.z.coerce.number().positive(), revenue: zod_1.z.coerce.number().nonnegative().default(0), estimatedTollsInr: zod_1.z.union([zod_1.z.null(), zod_1.z.coerce.number().nonnegative()]).optional().default(null), estimatedDurationMin: zod_1.z.coerce.number().int().positive().optional(), routeSummary: zod_1.z.string().max(300).optional(), routeProvider: zod_1.z.enum(['GOOGLE', 'VALHALLA']).optional(), tollEstimateStatus: zod_1.z.enum(['ESTIMATED', 'HISTORICAL_ESTIMATE', 'NO_TOLLS_EXPECTED', 'TOLLS_PRESENT_PRICE_UNKNOWN', 'UNAVAILABLE']).optional(), routeEstimatedAt: zod_1.z.coerce.date().optional() });
 app.get('/api/trips', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => res.json(await db.trip.findMany({ where: { organizationId: req.user.organizationId }, include: { vehicle: true, driver: true }, orderBy: { createdAt: 'desc' } }))));
+<<<<<<< Updated upstream
 const placeSchema = zod_1.z.object({ id: zod_1.z.string().min(1), name: zod_1.z.string().min(1), label: zod_1.z.string().min(1), city: zod_1.z.string().optional(), state: zod_1.z.string(), latitude: zod_1.z.number().finite().min(-90).max(90), longitude: zod_1.z.number().finite().min(-180).max(180), provider: zod_1.z.enum(['GOOGLE', 'PHOTON', 'BUILT_IN']) });
 app.get('/api/places/search', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => res.json(await (0, routePlanning_1.searchPlaces)(String(req.query.q || '')))));
 app.post('/api/routes/estimate', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => {
@@ -224,6 +228,8 @@ app.get('/api/trips/:id/profitability-estimate', allow(client_1.Role.DISPATCHER,
         throw Object.assign(new Error('Profitability is reviewed before a draft is dispatched'), { status: 409 });
     res.json(await estimateTripProfitability(req.user.organizationId, { vehicleId: trip.vehicleId, plannedDistanceKm: trip.plannedDistanceKm, revenue: trip.revenue, estimatedTollsInr: trip.estimatedTollsInr }));
 }));
+=======
+>>>>>>> Stashed changes
 async function getAssignmentContext(organizationId, vehicleId, driverId) {
     const [vehicle, driver, vehicleTrip, driverTrip, maintenance] = await Promise.all([
         db.vehicle.findFirst({ where: { id: vehicleId, organizationId } }),
@@ -301,9 +307,14 @@ async function analytics(organizationId) {
     const byVehicle = vehicles.map(v => { const vf = fuel.filter(x => x.vehicleId === v.id).reduce((s, x) => s + x.cost, 0), vm = maintenance.filter(x => x.vehicleId === v.id).reduce((s, x) => s + x.cost, 0), ve = expenses.filter(x => x.vehicleId === v.id).reduce((s, x) => s + x.amount, 0), vr = trips.filter(x => x.vehicleId === v.id).reduce((s, x) => s + x.revenue, 0); return { id: v.id, name: v.name, registrationNo: v.registrationNo, operationalCost: vf + vm + ve, roi: v.acquisitionCost ? ((vr - vf - vm) / v.acquisitionCost) * 100 : 0 }; });
     return { summary: { fuelEfficiency: liters ? distance / liters : 0, fleetUtilization: active ? vehicles.filter(x => x.status === client_1.VehicleStatus.ON_TRIP).length / active * 100 : 0, operationalCost: totalFuel + totalMaintenance + totalOther, vehicleRoi: acquisition ? (revenue - totalFuel - totalMaintenance) / acquisition * 100 : 0 }, byVehicle };
 }
+<<<<<<< Updated upstream
 const allowFinancialAnalytics = (req, res, next) => (0, security_1.disclosurePolicyForRole)(req.user.role).financialAnalytics ? next() : res.status(403).json({ message: 'You do not have permission to view financial analytics' });
 app.get('/api/analytics', allowFinancialAnalytics, asyncRoute(async (req, res) => res.json(await analytics(req.user.organizationId))));
 app.get('/api/analytics/export.csv', allowFinancialAnalytics, asyncRoute(async (req, res) => { const a = await analytics(req.user.organizationId); const csv = ['Vehicle,Registration,Operational Cost,ROI %', ...a.byVehicle.map(x => `"${x.name}","${x.registrationNo}",${x.operationalCost.toFixed(2)},${x.roi.toFixed(2)}`)].join('\n'); res.type('text/csv').attachment('fleetpilot-analytics.csv').send(csv); }));
+=======
+app.get('/api/analytics', allow(), asyncRoute(async (req, res) => res.json(await analytics(req.user.organizationId))));
+app.get('/api/analytics/export.csv', asyncRoute(async (req, res) => { const a = await analytics(req.user.organizationId); const csv = ['Vehicle,Registration,Operational Cost,ROI %', ...a.byVehicle.map(x => `"${x.name}","${x.registrationNo}",${x.operationalCost.toFixed(2)},${x.roi.toFixed(2)}`)].join('\n'); res.type('text/csv').attachment('fleetpilot-analytics.csv').send(csv); }));
+>>>>>>> Stashed changes
 app.use((err, _req, res, _next) => { console.error(err); if (err instanceof assignmentEligibility_1.AssignmentEligibilityError)
     return res.status(err.status).json({ code: err.code, message: err.message, reasons: err.reasons }); if (err instanceof client_1.Prisma.PrismaClientKnownRequestError) {
     if (err.code === 'P2002')
