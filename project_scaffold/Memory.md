@@ -34,10 +34,17 @@
 2. Stop tracking dependencies/cache/build outputs or define an explicit artifact policy.
 3. Restore the frontend lint command and add CI for backend tests plus both builds.
 4. Harden remaining lifecycle concurrency, direct status updates, authentication, and role read permissions.
-5. Define analytics formulas and production deployment/backup/monitoring.
+5. Obtain business approval for the implemented realized-performance analytics formulas and define production deployment/backup/monitoring.
 6. Address async error states, false affordances, dialog accessibility, focus, reduced motion, and mobile/keyboard tests.
 
 ## Milestone log
+
+### 2026-09-01 — Professional realized-performance reports
+
+- Rebuilt Reports & analytics as a decision dashboard with six auditable KPIs, a six-month revenue/cost/profit trajectory, cost composition, vehicle-status distribution, derived operational signals, and a sortable asset profitability scorecard.
+- Added a typed `fleetAnalytics` service. Realized revenue now uses completed trips only; recorded fuel, maintenance, toll, driver-payment, and other costs remain separately visible. Per-vehicle output includes revenue, cost, profit, margin, cost per km, distance, trip counts, and ROI.
+- Expanded the CSV export to the same asset-level financial fields and added three deterministic analytics tests, bringing the backend suite to 75 passing tests across 12 files.
+- Verified the AMartya Transport report in the browser at desktop and 390 px mobile widths with no horizontal page overflow. Also fixed the existing navigation key warning and added accessible names to mobile navigation controls.
 
 ### 2026-09-01 — Guarded Copilot operations workflows
 

@@ -64,7 +64,7 @@ The backend atomically creates the User and linked Driver with `mustChangePasswo
 }
 ```
 
-The new password must contain at least 10 characters, one uppercase letter, and one number. The backend reports `mustChangePassword` but does not block every other endpoint, so the mobile client must gate operational navigation until the change succeeds.
+The new password must contain at least 10 characters, one uppercase letter, and one number. Driver success returns a replacement `{ token, user }`; atomically replace the previous Bearer token so the updated `mustChangePassword: false` claim is active. The mobile client must gate operational navigation until the change succeeds, and the backend also rejects protected trip/location actions while the temporary-password claim remains true.
 
 ## Driver onboarding and approval
 
@@ -119,6 +119,10 @@ Route strategies are `SHORTEST`, `FASTEST`, and `TOLL_SAVER`. Providers are `GOO
 
 ## Driver trip reads
 
+### Driver authentication
+
+Native Driver apps sign in through `POST /driver/auth/login` with email and password. It returns `{ token, user }`; store the token in platform secure storage and send it as `Authorization: Bearer <token>`. The token expires after 24 hours. Web login continues to use its protected HTTP-only cookie.
+
 ### My Trips
 
 `GET /driver/me/trips` returns only trips belonging to the authenticated driver and only with status `DISPATCHED`, `IN_PROGRESS`, or `COMPLETED`. Each item includes the assigned vehicle.
@@ -139,6 +143,14 @@ Route strategies are `SHORTEST`, `FASTEST`, and `TOLL_SAVER`. Providers are `GOO
 Signed URLs expire. Refetch details before opening an old proof URL.
 
 ## Driver trip mutations
+
+### Live location batch
+
+`POST /driver/me/trips/:tripId/locations` as JSON accepts `points` with one to 50 samples. Each sample requires a stable `clientRequestId`, `latitude`, `longitude`, `accuracyM`, and `capturedAt`; it may include `speedKph`, `headingDeg`, `altitudeM`, `batteryPct`, and `isMocked`.
+
+Only the authenticated assigned driver may publish, and only while the trip is `DISPATCHED` or `IN_PROGRESS`. The first accepted point transitions a dispatched trip to `IN_PROGRESS`. Duplicate `(tripId, clientRequestId)` samples are ignored safely. Completion/cancellation makes later uploads return `409`.
+
+Authorized web operations read `GET /trips/:tripId/location` and subscribe to `GET /trips/:tripId/location/stream`. Web has a ten-second polling fallback.
 
 ### Start Trip
 
@@ -216,8 +228,6 @@ Do not invent client-only success states or undocumented endpoints for:
 - Driver-side trip completion. Web operations currently complete trips through privileged `POST /trips/:tripId/complete`.
 - Refresh tokens or forgot/reset password.
 - Push-notification device registration.
-- Background/live GPS tracking.
-- WebSockets or server-sent events.
 - Mobile-specific company/employee dashboards beyond existing role-protected APIs.
 
 The mobile app must hide/disable these actions and record the precise backend dependency.

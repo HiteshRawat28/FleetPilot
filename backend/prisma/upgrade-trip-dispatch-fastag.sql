@@ -91,10 +91,14 @@ CREATE TABLE IF NOT EXISTS "DriverDocument" (
   "objectKey" TEXT NOT NULL,
   "mimeType" TEXT NOT NULL,
   "originalName" TEXT NOT NULL,
+  "size" INTEGER NOT NULL DEFAULT 0,
   "extractedData" JSONB,
   "ocrConfidence" DOUBLE PRECISION,
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE "DriverDocument"
+  ADD COLUMN IF NOT EXISTS "size" INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS "TripEvidence" (
   "id" TEXT PRIMARY KEY,

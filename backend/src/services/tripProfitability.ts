@@ -42,6 +42,21 @@ export type TripProfitabilityEstimate = {
   estimateStatus: 'COMPLETE' | 'PARTIAL_TOLLS_UNAVAILABLE';
 };
 
+export type RealizedTripProfitabilityInput={
+  revenueInr:number;
+  fuelCostInr:number;
+  maintenanceCostInr:number;
+  otherExpenseCostInr:number;
+  driverPayoutInr:number;
+  tollCostInr:number;
+};
+
+export type RealizedTripProfitability=RealizedTripProfitabilityInput&{
+  actualTotalCostInr:number;
+  actualProfitInr:number;
+  actualProfitMarginPercent:number|null;
+};
+
 export type FuelPriceObservation={liters:number;cost:number;date:Date|string};
 export type FuelEfficiencyObservation={distanceKm:number;fuelConsumedL:number};
 
@@ -174,4 +189,17 @@ export function calculateTripProfitability(input: TripProfitabilityInput): TripP
     maintenanceRateSource,
     estimateStatus:estimatedTollsInr===null?'PARTIAL_TOLLS_UNAVAILABLE':'COMPLETE'
   };
+}
+
+export function calculateRealizedTripProfitability(input:RealizedTripProfitabilityInput):RealizedTripProfitability{
+  Object.entries(input).forEach(([name,value])=>assertFiniteNonNegative(value,name));
+  const revenueInr=roundCurrency(input.revenueInr);
+  const fuelCostInr=roundCurrency(input.fuelCostInr);
+  const maintenanceCostInr=roundCurrency(input.maintenanceCostInr);
+  const otherExpenseCostInr=roundCurrency(input.otherExpenseCostInr);
+  const driverPayoutInr=roundCurrency(input.driverPayoutInr);
+  const tollCostInr=roundCurrency(input.tollCostInr);
+  const actualTotalCostInr=roundCurrency(fuelCostInr+maintenanceCostInr+otherExpenseCostInr+driverPayoutInr+tollCostInr);
+  const actualProfitInr=roundCurrency(revenueInr-actualTotalCostInr);
+  return {revenueInr,fuelCostInr,maintenanceCostInr,otherExpenseCostInr,driverPayoutInr,tollCostInr,actualTotalCostInr,actualProfitInr,actualProfitMarginPercent:revenueInr>0?Math.round(actualProfitInr/revenueInr*10000)/100:null};
 }

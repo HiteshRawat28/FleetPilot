@@ -94,3 +94,11 @@ const base = {
         (0, vitest_1.expect)((0, tripProfitability_1.buildFuelPrediction)([{ liters: 20, cost: 1800, date: '2026-09-01' }], [])).toBeUndefined();
     });
 });
+(0, vitest_1.describe)('calculateRealizedTripProfitability', () => {
+    (0, vitest_1.it)('keeps driver, toll and other expenses separate while calculating realized profit', () => {
+        (0, vitest_1.expect)((0, tripProfitability_1.calculateRealizedTripProfitability)({ revenueInr: 50000, fuelCostInr: 9000, maintenanceCostInr: 1200, otherExpenseCostInr: 800, driverPayoutInr: 2500, tollCostInr: 1800 })).toEqual({ revenueInr: 50000, fuelCostInr: 9000, maintenanceCostInr: 1200, otherExpenseCostInr: 800, driverPayoutInr: 2500, tollCostInr: 1800, actualTotalCostInr: 15300, actualProfitInr: 34700, actualProfitMarginPercent: 69.4 });
+    });
+    (0, vitest_1.it)('does not create a misleading margin when revenue is zero', () => {
+        (0, vitest_1.expect)((0, tripProfitability_1.calculateRealizedTripProfitability)({ revenueInr: 0, fuelCostInr: 100, maintenanceCostInr: 0, otherExpenseCostInr: 0, driverPayoutInr: 0, tollCostInr: 0 }).actualProfitMarginPercent).toBeNull();
+    });
+});

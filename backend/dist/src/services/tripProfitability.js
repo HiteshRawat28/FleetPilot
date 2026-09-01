@@ -5,6 +5,7 @@ exports.resolveFuelRate = resolveFuelRate;
 exports.resolvePredictedFuelRate = resolvePredictedFuelRate;
 exports.buildFuelPrediction = buildFuelPrediction;
 exports.calculateTripProfitability = calculateTripProfitability;
+exports.calculateRealizedTripProfitability = calculateRealizedTripProfitability;
 const DEFAULT_CONFIG = {
     fuelRatesInrPerKm: { DEFAULT: 18, VAN: 14, TRUCK: 24, BUS: 21 },
     maintenanceMinHistoryKm: 1000,
@@ -133,4 +134,16 @@ function calculateTripProfitability(input) {
         maintenanceRateSource,
         estimateStatus: estimatedTollsInr === null ? 'PARTIAL_TOLLS_UNAVAILABLE' : 'COMPLETE'
     };
+}
+function calculateRealizedTripProfitability(input) {
+    Object.entries(input).forEach(([name, value]) => assertFiniteNonNegative(value, name));
+    const revenueInr = roundCurrency(input.revenueInr);
+    const fuelCostInr = roundCurrency(input.fuelCostInr);
+    const maintenanceCostInr = roundCurrency(input.maintenanceCostInr);
+    const otherExpenseCostInr = roundCurrency(input.otherExpenseCostInr);
+    const driverPayoutInr = roundCurrency(input.driverPayoutInr);
+    const tollCostInr = roundCurrency(input.tollCostInr);
+    const actualTotalCostInr = roundCurrency(fuelCostInr + maintenanceCostInr + otherExpenseCostInr + driverPayoutInr + tollCostInr);
+    const actualProfitInr = roundCurrency(revenueInr - actualTotalCostInr);
+    return { revenueInr, fuelCostInr, maintenanceCostInr, otherExpenseCostInr, driverPayoutInr, tollCostInr, actualTotalCostInr, actualProfitInr, actualProfitMarginPercent: revenueInr > 0 ? Math.round(actualProfitInr / revenueInr * 10000) / 100 : null };
 }

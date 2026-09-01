@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildFuelPrediction, calculateTripProfitability, resolveFuelRate, type TripProfitabilityConfig } from './tripProfitability';
+import { buildFuelPrediction, calculateRealizedTripProfitability, calculateTripProfitability, resolveFuelRate, type TripProfitabilityConfig } from './tripProfitability';
 
 const config: TripProfitabilityConfig = {
   fuelRatesInrPerKm: { DEFAULT: 18, VAN: 14, TRUCK: 24, BUS: 21 },
@@ -105,5 +105,15 @@ describe('buildFuelPrediction',()=>{
   it('returns no prediction until both price and efficiency history exist',()=>{
     expect(buildFuelPrediction([], [{distanceKm:100,fuelConsumedL:20}])).toBeUndefined();
     expect(buildFuelPrediction([{liters:20,cost:1800,date:'2026-09-01'}], [])).toBeUndefined();
+  });
+});
+
+describe('calculateRealizedTripProfitability',()=>{
+  it('keeps driver, toll and other expenses separate while calculating realized profit',()=>{
+    expect(calculateRealizedTripProfitability({revenueInr:50000,fuelCostInr:9000,maintenanceCostInr:1200,otherExpenseCostInr:800,driverPayoutInr:2500,tollCostInr:1800})).toEqual({revenueInr:50000,fuelCostInr:9000,maintenanceCostInr:1200,otherExpenseCostInr:800,driverPayoutInr:2500,tollCostInr:1800,actualTotalCostInr:15300,actualProfitInr:34700,actualProfitMarginPercent:69.4});
+  });
+
+  it('does not create a misleading margin when revenue is zero',()=>{
+    expect(calculateRealizedTripProfitability({revenueInr:0,fuelCostInr:100,maintenanceCostInr:0,otherExpenseCostInr:0,driverPayoutInr:0,tollCostInr:0}).actualProfitMarginPercent).toBeNull();
   });
 });
