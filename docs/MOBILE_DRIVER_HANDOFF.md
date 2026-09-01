@@ -132,6 +132,7 @@ Route strategies are `SHORTEST`, `FASTEST`, and `TOLL_SAVER`. Providers are `GOO
 - `evidence` with temporary signed `url` values;
 - `fuelLogs` with temporary signed `receiptUrl` values;
 - `expenses` with temporary signed `receiptUrl` values;
+- `fastagTransactions` and `vehicle.fastagConnection` for automatic toll status;
 - trip-linked `maintenance` with temporary signed `photoUrl` values;
 - `costSummary.fuel`, `costSummary.expenses`, and `costSummary.maintenance`.
 
@@ -188,6 +189,11 @@ Allowed only while `IN_PROGRESS`. The server creates one canonical FuelLog and o
 
 Allowed only while `IN_PROGRESS`. The server creates one canonical Expense and one `EXPENSE_RECEIPT` evidence item linked to organization, driver, trip, and vehicle. If OCR cannot determine the total, it returns `422`; retry the same photo and key with `confirmedAmount`.
 
+When the assigned vehicle has an active FASTag connection, hide `TOLL` from the
+receipt flow and show “Toll will synchronize automatically through FASTag.” The
+server rejects a manual driver toll with `409` to prevent double accounting. Cash
+or exceptional tolls must be entered by authorized web finance operations.
+
 ### Report Vehicle Issue
 
 `POST /driver/me/trips/:tripId/maintenance` as `multipart/form-data`:
@@ -237,6 +243,7 @@ The mobile app must hide/disable these actions and record the precise backend de
 | Fuel receipt | FuelLog + FUEL_RECEIPT evidence | Trip Details and Fuel & Expenses |
 | Expense receipt | Expense + EXPENSE_RECEIPT evidence | Trip Details and Fuel & Expenses |
 | Vehicle issue | Maintenance(REPORTED) | Trip Details and Maintenance |
+| FASTag plaza settlement | FastagTransaction + Expense(TOLL, FASTAG) | Trip Details and Fuel & Expenses |
 
 Web Trip Details polls every 4 seconds. Web Maintenance and Fuel & Expenses poll every 5 seconds.
 

@@ -109,11 +109,12 @@ async function googleRoutes(from, to, avoidTolls = false) {
     const key = mapsKey();
     if (!key)
         return [];
-    const response = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.description' }, body: JSON.stringify({ origin: { location: { latLng: { latitude: from.latitude, longitude: from.longitude } } }, destination: { location: { latLng: { latitude: to.latitude, longitude: to.longitude } } }, travelMode: 'DRIVE', routingPreference: 'TRAFFIC_UNAWARE', computeAlternativeRoutes: !avoidTolls, routeModifiers: { avoidTolls } }), signal: AbortSignal.timeout(6500) });
+    const response = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.description,routes.polyline.encodedPolyline,routes.travelAdvisory.tollInfo' }, body: JSON.stringify({ origin: { location: { latLng: { latitude: from.latitude, longitude: from.longitude } } }, destination: { location: { latLng: { latitude: to.latitude, longitude: to.longitude } } }, travelMode: 'DRIVE', routingPreference: 'TRAFFIC_AWARE', computeAlternativeRoutes: !avoidTolls, extraComputations: ['TOLLS'], routeModifiers: { avoidTolls, vehicleInfo: { emissionType: 'DIESEL' } } }), signal: AbortSignal.timeout(6500) });
     if (!response.ok)
         return [];
     const result = await response.json();
-    return (result.routes || []).flatMap(route => route.distanceMeters && route.duration ? [{ distanceKm: route.distanceMeters / 1000, durationMinutes: Number.parseFloat(route.duration) / 60, via: route.description || 'Google recommended roads', provider: 'GOOGLE' }] : []);
+    return (result.routes || []).flatMap(route => { if (!route.distanceMeters || !route.duration)
+        return []; const price = route.travelAdvisory?.tollInfo?.estimatedPrice?.find(item => item.currencyCode === 'INR') || route.travelAdvisory?.tollInfo?.estimatedPrice?.[0]; return [{ distanceKm: route.distanceMeters / 1000, durationMinutes: Number.parseFloat(route.duration) / 60, via: route.description || 'Google recommended roads', provider: 'GOOGLE', polyline: route.polyline?.encodedPolyline, estimatedToll: price ? Number(price.units || 0) + (price.nanos || 0) / 1_000_000_000 : undefined }]; });
 }
 async function valhallaRoute(from, to, mode) {
     const costingOptions = mode === 'shortest' ? { shortest: true } : mode === 'toll-saver' ? { use_tolls: 0.1, use_highways: 0.65 } : {};
@@ -129,7 +130,7 @@ async function valhallaRoute(from, to, mode) {
             return null;
         const roads = (result.trip?.legs || []).flatMap(leg => leg.maneuvers || []).flatMap(step => step.street_names || []).filter(Boolean);
         const via = [...new Set(roads)].filter(name => /NH|SH|Express|Highway/i.test(name)).slice(0, 2).join(' / ');
-        return { distanceKm: summary.length, durationMinutes: saneDuration(summary.length, summary.time / 60), via: via || 'Mapped road network', provider: 'VALHALLA' };
+        return { distanceKm: summary.length, durationMinutes: saneDuration(summary.length, summary.time / 60), via: via || 'Mapped road network', provider: 'VALHALLA', polyline: result.trip?.legs?.[0]?.shape };
     }
     catch {
         return null;
@@ -155,6 +156,6 @@ async function estimateRoutes(source, destination, vehicleType = 'vehicle') {
     shortest = shortest || available.slice().sort((a, b) => a.distanceKm - b.distanceKm)[0];
     fastest = fastest || available.slice().sort((a, b) => a.durationMinutes - b.durationMinutes)[0];
     tollSaver = tollSaver || shortest;
-    const factor = tollFactor(vehicleType), option = (strategy, label, route, tollRate, recommended = false) => ({ id: strategy, label, strategy, recommended, distanceKm: Math.round(route.distanceKm), durationMinutes: Math.max(15, Math.round(route.durationMinutes)), estimatedToll: roundToll(route.distanceKm * tollRate * factor), via: route.via, provider: route.provider });
+    const factor = tollFactor(vehicleType), option = (strategy, label, route, tollRate, recommended = false) => ({ id: strategy, label, strategy, recommended, distanceKm: Math.round(route.distanceKm), durationMinutes: Math.max(15, Math.round(route.durationMinutes)), estimatedToll: roundToll(route.estimatedToll != null ? route.estimatedToll * factor : route.distanceKm * tollRate * factor), via: route.via, provider: route.provider, polyline: route.polyline });
     return { source, destination, options: [option('SHORTEST', 'Shortest route', shortest, 1.12, true), option('FASTEST', 'Fastest route', fastest, 1.35), option('TOLL_SAVER', 'Lower toll route', tollSaver, .52)] };
 }

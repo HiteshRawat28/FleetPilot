@@ -32,3 +32,44 @@ Authentication flow:
 - `Create company` creates a tenant-isolated organization and makes the first user its `OWNER`.
 - Owners and admins create employee credentials and assign roles from **People & access**.
 - Sign-in never accepts a role from the browser; the API resolves it from the stored organization membership.
+
+## Trip dispatch upgrade
+
+Existing databases must run the base organization upgrade first, followed by the
+data-preserving trip/driver/FASTag upgrade:
+
+```bash
+npm run db:upgrade
+npm run db:upgrade:trip-dispatch
+npm run build
+```
+
+New databases can use `npm run db:push`. The upgraded model stores exact route
+coordinates, route snapshots, driver documents, trip evidence, trip-linked fuel,
+expenses and maintenance, plus canonical FASTag transactions.
+
+Route planning uses `GOOGLE_MAPS_API_KEY` when available and falls back to Photon
+and Valhalla. Google toll data is requested with `TOLLS`; commercial-vehicle
+adjustments remain clearly labelled as estimates.
+
+### FASTag integration
+
+FASTag transaction history cannot be fetched from a registration number without
+authorized issuer access. Configure an issuer/fleet-provider API or signed webhook:
+
+```env
+FASTAG_PROVIDER_BASE_URL=https://issuer.example/api
+FASTAG_PROVIDER_API_TOKEN=server-side-token
+FASTAG_WEBHOOK_SECRET=long-random-shared-secret
+```
+
+- Connect a vehicle with `POST /api/vehicles/:id/fastag`.
+- Pull issuer transactions with `POST /api/vehicles/:id/fastag/sync`.
+- Provider webhooks post to `POST /api/fastag/webhook/:connectionId` and sign the
+  canonical body `${connectionId}.${JSON.stringify(body)}` using HMAC-SHA256 in
+  `X-FASTag-Signature: sha256=<hex>`.
+- `providerTxnId` is idempotent per connection.
+- Settled, confidently matched transactions create one `TOLL` expense with source
+  `FASTAG`; reversals zero that same expense without deleting the audit record.
+- Uncertain matches are returned by
+  `GET /api/fastag/transactions?matchStatus=REVIEW_REQUIRED`.

@@ -171,6 +171,11 @@ Submit to `POST /api/driver/me/trips/:tripId/expenses`. On `422`, confirm total 
 
 Never send `driverId`, `vehicleId`, `tripId`, or `organizationId` in mutation bodies. The backend links every record so web accounting shows correct driver-wise and trip-wise totals.
 
+If Trip Details reports an active vehicle FASTag connection, remove `TOLL` from
+the driver expense choices and display that tolls synchronize automatically. A
+`409` for a toll submission means FASTag protection prevented a duplicate; refetch
+the trip instead of retrying or asking for a receipt photo.
+
 ### Vehicle Health and maintenance
 
 Show assigned registration/status and open `REPORTED`/`ACTIVE` maintenance.
