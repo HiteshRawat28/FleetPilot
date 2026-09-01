@@ -1,4 +1,4 @@
-import { PrismaClient, Role, VehicleStatus, DriverStatus, TripStatus, MaintenanceStatus, ExpenseType } from '@prisma/client';
+import { PrismaClient, Role, VehicleStatus, DriverStatus, TripStatus, MaintenanceStatus, ExpenseType, LicenseCategory } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 
 const db = new PrismaClient();
@@ -16,16 +16,16 @@ async function main() {
     { name:'Arjun Mehta', email:'finance@transitops.in', passwordHash, role:Role.FINANCIAL_ANALYST, organizationId }
   ]});
   const [van, truck, mini, retired] = await Promise.all([
-    db.vehicle.create({data:{organizationId,registrationNo:'GJ01AB4523',name:'Van-05',type:'Van',capacityKg:500,odometerKm:74000,acquisitionCost:620000,status:VehicleStatus.AVAILABLE,region:'West'}}),
-    db.vehicle.create({data:{organizationId,registrationNo:'GJ01AB7898',name:'Truck-11',type:'Truck',capacityKg:5000,odometerKm:182000,acquisitionCost:2450000,status:VehicleStatus.ON_TRIP,region:'West'}}),
-    db.vehicle.create({data:{organizationId,registrationNo:'GJ01AB1120',name:'Mini-09',type:'Mini Truck',capacityKg:1000,odometerKm:66000,acquisitionCost:410000,status:VehicleStatus.IN_SHOP,region:'North'}}),
-    db.vehicle.create({data:{organizationId,registrationNo:'GJ01AB0098',name:'Van-09',type:'Van',capacityKg:750,odometerKm:249000,acquisitionCost:540000,status:VehicleStatus.RETIRED,region:'South'}})
+    db.vehicle.create({data:{organizationId,registrationNo:'GJ01AB4523',name:'Van-05',type:'Van',capacityKg:500,requiredLicenseCategory:LicenseCategory.LMV,odometerKm:74000,acquisitionCost:620000,status:VehicleStatus.AVAILABLE,region:'West'}}),
+    db.vehicle.create({data:{organizationId,registrationNo:'GJ01AB7898',name:'Truck-11',type:'Truck',capacityKg:5000,requiredLicenseCategory:LicenseCategory.HMV,odometerKm:182000,acquisitionCost:2450000,status:VehicleStatus.ON_TRIP,region:'West'}}),
+    db.vehicle.create({data:{organizationId,registrationNo:'GJ01AB1120',name:'Mini-09',type:'Mini Truck',capacityKg:1000,requiredLicenseCategory:LicenseCategory.LMV,odometerKm:66000,acquisitionCost:410000,status:VehicleStatus.IN_SHOP,region:'North'}}),
+    db.vehicle.create({data:{organizationId,registrationNo:'GJ01AB0098',name:'Van-09',type:'Van',capacityKg:750,requiredLicenseCategory:LicenseCategory.LMV,odometerKm:249000,acquisitionCost:540000,status:VehicleStatus.RETIRED,region:'South'}})
   ]);
   const [alex,john,priya,suresh] = await Promise.all([
-    db.driver.create({data:{organizationId,name:'Alex',licenseNo:'DL-7785',licenseCategory:'LMV',licenseExpiry:new Date('2028-12-10'),contact:'+91 98765 43000',safetyScore:96,status:DriverStatus.AVAILABLE}}),
-    db.driver.create({data:{organizationId,name:'John',licenseNo:'DL-9960',licenseCategory:'HMV',licenseExpiry:new Date('2027-11-15'),contact:'+91 98220 44110',safetyScore:89,status:DriverStatus.ON_TRIP}}),
-    db.driver.create({data:{organizationId,name:'Priya',licenseNo:'DL-7705',licenseCategory:'LMV',licenseExpiry:new Date('2027-10-30'),contact:'+91 97650 33211',safetyScore:98,status:DriverStatus.OFF_DUTY}}),
-    db.driver.create({data:{organizationId,name:'Suresh',licenseNo:'DL-4005',licenseCategory:'HMV',licenseExpiry:new Date('2025-01-20'),contact:'+91 99000 55222',safetyScore:72,status:DriverStatus.SUSPENDED}})
+    db.driver.create({data:{organizationId,name:'Alex',licenseNo:'DL-7785',licenseCategory:LicenseCategory.LMV,licenseExpiry:new Date('2028-12-10'),contact:'+91 98765 43000',safetyScore:96,status:DriverStatus.AVAILABLE}}),
+    db.driver.create({data:{organizationId,name:'John',licenseNo:'DL-9960',licenseCategory:LicenseCategory.HMV,licenseExpiry:new Date('2027-11-15'),contact:'+91 98220 44110',safetyScore:89,status:DriverStatus.ON_TRIP}}),
+    db.driver.create({data:{organizationId,name:'Priya',licenseNo:'DL-7705',licenseCategory:LicenseCategory.LMV,licenseExpiry:new Date('2027-10-30'),contact:'+91 97650 33211',safetyScore:98,status:DriverStatus.OFF_DUTY}}),
+    db.driver.create({data:{organizationId,name:'Suresh',licenseNo:'DL-4005',licenseCategory:LicenseCategory.HMV,licenseExpiry:new Date('2025-01-20'),contact:'+91 99000 55222',safetyScore:72,status:DriverStatus.SUSPENDED}})
   ]);
   await db.trip.createMany({data:[
     {organizationId,tripNo:'TRP001',source:'Ahmedabad Depot',destination:'Surat Warehouse',cargoWeightKg:3200,plannedDistanceKm:265,revenue:45000,status:TripStatus.DISPATCHED,vehicleId:truck.id,driverId:john.id,dispatchedAt:new Date()},

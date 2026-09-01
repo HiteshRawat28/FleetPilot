@@ -14,7 +14,6 @@ enum Role {
   DISPATCHER
   SAFETY_OFFICER
   FINANCIAL_ANALYST
-  DRIVER
 }
 
 enum VehicleStatus {
@@ -31,311 +30,169 @@ enum DriverStatus {
   SUSPENDED
 }
 
+enum LicenseCategory {
+  LMV
+  HMV
+  MCWG
+}
+
 enum TripStatus {
   DRAFT
   DISPATCHED
-  IN_PROGRESS
   COMPLETED
   CANCELLED
 }
 
-enum DriverOnboardingStatus {
-  PENDING
-  NEEDS_REVIEW
-  VERIFIED
-  REJECTED
-}
-
-enum DriverDocumentType {
-  PROFILE_PHOTO
-  LICENSE_FRONT
-  LICENSE_BACK
-}
-
-enum TripEvidenceType {
-  ODOMETER_START
-  ODOMETER_END
-  SITE_UPDATE
-  FUEL_RECEIPT
-  EXPENSE_RECEIPT
-  MAINTENANCE_REPORT
-}
-
 enum MaintenanceStatus {
-  REPORTED
   ACTIVE
   CLOSED
 }
 
 enum ExpenseType {
-  FOOD
-  LODGING
-  PARKING
   TOLL
   REPAIR
   INSURANCE
   OTHER
 }
 
-enum RecordSource {
-  WEB
-  DRIVER_MOBILE
-}
-
 model User {
-  id                 String       @id @default(cuid())
-  name               String
-  email              String       @unique
-  passwordHash       String?
-  googleSub          String?      @unique
-  role               Role
-  organizationId     String
-  organization       Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  isActive           Boolean      @default(true)
-  mustChangePassword Boolean      @default(false)
-  lastLoginAt        DateTime?
-  lastActiveAt       DateTime?
-  createdAt          DateTime     @default(now())
-  driverProfile      Driver?
+  id String @id @default(cuid())
+  name String
+  email String @unique
+  passwordHash String?
+  googleSub String? @unique
+  role Role
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  isActive Boolean @default(true)
+  lastLoginAt DateTime?
+  lastActiveAt DateTime?
+  createdAt DateTime @default(now())
 
   @@index([organizationId])
 }
 
 model Organization {
-  id              String           @id @default(cuid())
-  name            String
-  slug            String           @unique
+  id String @id @default(cuid())
+  name String
+  slug String @unique
   operationsEmail String?
-  createdAt       DateTime         @default(now())
-  users           User[]
-  vehicles        Vehicle[]
-  drivers         Driver[]
-  trips           Trip[]
-  maintenance     Maintenance[]
-  fuelLogs        FuelLog[]
-  expenses        Expense[]
-  driverDocuments DriverDocument[]
-  tripEvidence    TripEvidence[]
+  createdAt DateTime @default(now())
+  users User[]
+  vehicles Vehicle[]
+  drivers Driver[]
+  trips Trip[]
+  maintenance Maintenance[]
+  fuelLogs FuelLog[]
+  expenses Expense[]
 }
 
 model Vehicle {
-  id              String         @id @default(cuid())
-  registrationNo  String
-  organizationId  String
-  organization    Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  name            String
-  type            String
-  capacityKg      Float
-  odometerKm      Float          @default(0)
+  id String @id @default(cuid())
+  registrationNo String
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name String
+  type String
+  capacityKg Float
+  requiredLicenseCategory LicenseCategory @default(LMV)
+  odometerKm Float @default(0)
   acquisitionCost Float
-  status          VehicleStatus  @default(AVAILABLE)
-  region          String         @default("Central")
-  createdAt       DateTime       @default(now())
-  trips           Trip[]
-  maintenance     Maintenance[]
-  fuelLogs        FuelLog[]
-  expenses        Expense[]
-  tripEvidence    TripEvidence[]
+  status VehicleStatus @default(AVAILABLE)
+  region String @default("Central")
+  createdAt DateTime @default(now())
+  trips Trip[]
+  maintenance Maintenance[]
+  fuelLogs FuelLog[]
+  expenses Expense[]
 
   @@unique([organizationId, registrationNo])
   @@index([organizationId])
 }
 
 model Driver {
-  id               String                 @id @default(cuid())
-  name             String
-  licenseNo        String
-  organizationId   String
-  organization     Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  licenseCategory  String
-  licenseExpiry    DateTime
-  contact          String
-  safetyScore      Int                    @default(100)
-  status           DriverStatus           @default(AVAILABLE)
-  onboardingStatus DriverOnboardingStatus @default(PENDING)
-  userId           String?                @unique
-  user             User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
-  verifiedAt       DateTime?
-  reviewedAt       DateTime?
-  reviewedById     String?
-  reviewNote       String?
-  createdAt        DateTime               @default(now())
-  trips            Trip[]
-  documents        DriverDocument[]
-  tripEvidence     TripEvidence[]
-  maintenance      Maintenance[]
-  fuelLogs         FuelLog[]
-  expenses         Expense[]
+  id String @id @default(cuid())
+  name String
+  licenseNo String
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  licenseCategory String
+  licenseExpiry DateTime
+  contact String
+  safetyScore Int @default(100)
+  status DriverStatus @default(AVAILABLE)
+  createdAt DateTime @default(now())
+  trips Trip[]
 
   @@unique([organizationId, licenseNo])
   @@index([organizationId])
 }
 
 model Trip {
-  id                       String         @id @default(cuid())
-  tripNo                   String
-  organizationId           String
-  organization             Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  source                   String
-  destination              String
-  sourceCityId             String?
-  destinationCityId        String?
-  cargoWeightKg            Float
-  plannedDistanceKm        Float
-  estimatedDurationMinutes Int?
-  estimatedToll            Float          @default(0)
-  routeStrategy            String?
-  routeLabel               String?
-  routeVia                 String?
-  routeProvider            String?
-  finalOdometerKm          Float?
-  fuelConsumedL            Float?
-  revenue                  Float          @default(0)
-  status                   TripStatus     @default(DRAFT)
-  vehicleId                String
-  driverId                 String
-  vehicle                  Vehicle        @relation(fields: [vehicleId], references: [id])
-  driver                   Driver         @relation(fields: [driverId], references: [id])
-  createdAt                DateTime       @default(now())
-  dispatchedAt             DateTime?
-  startedAt                DateTime?
-  startOdometerKm          Float?
-  completedAt              DateTime?
-  evidence                 TripEvidence[]
-  maintenance              Maintenance[]
-  fuelLogs                 FuelLog[]
-  expenses                 Expense[]
+  id String @id @default(cuid())
+  tripNo String
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  source String
+  destination String
+  cargoWeightKg Float
+  plannedDistanceKm Float
+  finalOdometerKm Float?
+  fuelConsumedL Float?
+  revenue Float @default(0)
+  status TripStatus @default(DRAFT)
+  vehicleId String
+  driverId String
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
+  driver Driver @relation(fields: [driverId], references: [id])
+  createdAt DateTime @default(now())
+  dispatchedAt DateTime?
+  completedAt DateTime?
 
   @@unique([organizationId, tripNo])
   @@index([organizationId])
 }
 
-model DriverDocument {
-  id             String             @id @default(cuid())
-  organizationId String
-  organization   Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  driverId       String
-  driver         Driver             @relation(fields: [driverId], references: [id], onDelete: Cascade)
-  type           DriverDocumentType
-  objectKey      String             @unique
-  mimeType       String
-  originalName   String
-  extractedData  Json?
-  ocrConfidence  Float?
-  createdAt      DateTime           @default(now())
-
-  @@unique([driverId, type])
-  @@index([organizationId, driverId])
-}
-
-model TripEvidence {
-  id                  String           @id @default(cuid())
-  organizationId      String
-  organization        Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  tripId              String
-  trip                Trip             @relation(fields: [tripId], references: [id], onDelete: Cascade)
-  driverId            String
-  driver              Driver           @relation(fields: [driverId], references: [id])
-  vehicleId           String
-  vehicle             Vehicle          @relation(fields: [vehicleId], references: [id])
-  type                TripEvidenceType
-  objectKey           String?          @unique
-  mimeType            String?
-  originalName        String?
-  extractedOdometerKm Float?
-  ocrConfidence       Float?
-  registrationNo      String?
-  note                String?
-  latitude            Float?
-  longitude           Float?
-  fuelLiters          Float?
-  amount              Float?
-  fuelStation         String?
-  clientRequestId     String?          @unique
-  createdAt           DateTime         @default(now())
-
-  @@index([organizationId, driverId])
-  @@index([tripId, createdAt])
-}
-
 model Maintenance {
-  id                 String            @id @default(cuid())
-  vehicleId          String
-  organizationId     String
-  organization       Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  vehicle            Vehicle           @relation(fields: [vehicleId], references: [id])
-  tripId             String?
-  trip               Trip?             @relation(fields: [tripId], references: [id], onDelete: SetNull)
-  driverId           String?
-  driver             Driver?           @relation(fields: [driverId], references: [id], onDelete: SetNull)
-  serviceType        String
-  description        String?
-  severity           String?
-  reportedOdometerKm Float?
-  cost               Float             @default(0)
-  source             RecordSource      @default(WEB)
-  objectKey          String?           @unique
-  mimeType           String?
-  originalName       String?
-  clientRequestId    String?           @unique
-  startDate          DateTime          @default(now())
-  endDate            DateTime?
-  status             MaintenanceStatus @default(ACTIVE)
+  id String @id @default(cuid())
+  vehicleId String
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
+  serviceType String
+  description String?
+  cost Float
+  startDate DateTime @default(now())
+  endDate DateTime?
+  status MaintenanceStatus @default(ACTIVE)
 
   @@index([organizationId])
-  @@index([tripId, driverId])
 }
 
 model FuelLog {
-  id               String       @id @default(cuid())
-  vehicleId        String
-  organizationId   String
-  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  vehicle          Vehicle      @relation(fields: [vehicleId], references: [id])
-  tripId           String?
-  trip             Trip?        @relation(fields: [tripId], references: [id], onDelete: SetNull)
-  driverId         String?
-  driver           Driver?      @relation(fields: [driverId], references: [id], onDelete: SetNull)
-  liters           Float
-  cost             Float
-  date             DateTime     @default(now())
-  odometerKm       Float?
-  fuelStation      String?
-  source           RecordSource @default(WEB)
-  receiptObjectKey String?      @unique
-  receiptMimeType  String?
-  receiptName      String?
-  ocrConfidence    Float?
-  extractedData    Json?
-  clientRequestId  String?      @unique
+  id String @id @default(cuid())
+  vehicleId String
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
+  liters Float
+  cost Float
+  date DateTime @default(now())
+  odometerKm Float?
 
   @@index([organizationId])
-  @@index([tripId, driverId])
 }
 
 model Expense {
-  id               String       @id @default(cuid())
-  vehicleId        String
-  organizationId   String
-  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  vehicle          Vehicle      @relation(fields: [vehicleId], references: [id])
-  tripId           String?
-  trip             Trip?        @relation(fields: [tripId], references: [id], onDelete: SetNull)
-  driverId         String?
-  driver           Driver?      @relation(fields: [driverId], references: [id], onDelete: SetNull)
-  type             ExpenseType
-  description      String?
-  vendor           String?
-  amount           Float
-  date             DateTime     @default(now())
-  source           RecordSource @default(WEB)
-  receiptObjectKey String?      @unique
-  receiptMimeType  String?
-  receiptName      String?
-  ocrConfidence    Float?
-  extractedData    Json?
-  clientRequestId  String?      @unique
+  id String @id @default(cuid())
+  vehicleId String
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
+  type ExpenseType
+  description String?
+  amount Float
+  date DateTime @default(now())
 
   @@index([organizationId])
-  @@index([tripId, driverId])
 }
