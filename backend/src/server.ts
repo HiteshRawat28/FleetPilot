@@ -22,7 +22,7 @@ import { passwordSchema } from './auth/passwordPolicy';
 import { InvalidResetTokenError, PasswordResetService } from './auth/passwordReset';
 import { createRateLimit, privacyHash } from './auth/rateLimit';
 import { assertEmailConfiguration } from './services/email';
-import { locationTimestampBelongsToDispatch,trackingStatus } from './services/locationTracking';
+import { locationTimestampBelongsToDispatch, locationTrustProblem, trackingStatus } from './services/locationTracking';
 import { receivesTripNotification } from './services/notificationAudience';
 
 const db = new PrismaClient();
@@ -323,16 +323,20 @@ const teamAccessSchema=z.object({name:z.string().trim().min(2).max(80),email:z.e
 const driverAccessSchema=z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:passwordSchema,contact:z.string().trim().min(7).max(30),payType:z.enum(DriverPayType).default(DriverPayType.PER_TRIP),payRate:z.coerce.number().nonnegative().default(0)});
 app.post('/api/users',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{
   const {name,email,password,role}=parse(teamAccessSchema,req.body);
+  const normalizedEmail=email.toLowerCase();
   if(req.user!.role===Role.ADMIN&&role===Role.ADMIN)return res.status(403).json({message:'Only the Owner can add another Admin'});
+  if(await db.user.findUnique({where:{email:normalizedEmail},select:{id:true}}))return res.status(409).json({message:'An account already exists for this email'});
   const passwordHash=await bcrypt.hash(password,12);
-  const user=await db.user.create({data:{name,email:email.toLowerCase(),passwordHash,role,organizationId:req.user!.organizationId}});
+  const user=await db.user.create({data:{name,email:normalizedEmail,passwordHash,role,organizationId:req.user!.organizationId}});
   res.status(201).json({id:user.id,name:user.name,email:user.email,role:user.role,isActive:user.isActive,createdAt:user.createdAt});
 }));
 app.post('/api/driver-access',allow(Role.OWNER,Role.ADMIN,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
   const {name,email,password,contact,payType,payRate}=parse(driverAccessSchema,req.body);
+  const normalizedEmail=email.toLowerCase();
+  if(await db.user.findUnique({where:{email:normalizedEmail},select:{id:true}}))return res.status(409).json({message:'An account already exists for this email'});
   const passwordHash=await bcrypt.hash(password,12);
   const user=await db.$transaction(async tx=>{
-    const created=await tx.user.create({data:{name,email:email.toLowerCase(),phone:contact,passwordHash,role:Role.DRIVER,organizationId:req.user!.organizationId,mustChangePassword:true}});
+    const created=await tx.user.create({data:{name,email:normalizedEmail,phone:contact,passwordHash,role:Role.DRIVER,organizationId:req.user!.organizationId,mustChangePassword:true}});
     await tx.driver.create({data:{name,licenseNo:`PENDING-${created.id}`,licenseCategory:LicenseCategory.LMV,licenseExpiry:new Date(0),contact,payType,payRate,status:DriverStatus.OFF_DUTY,onboardingStatus:DriverOnboardingStatus.PENDING,organizationId:req.user!.organizationId,userId:created.id}});
     return created;
   });
@@ -443,11 +447,13 @@ app.delete('/api/drivers/:id',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res
 const tripSchema=z.object({source:z.string().min(2),destination:z.string().min(2),vehicleId:z.string(),driverId:z.string(),cargoWeightKg:z.coerce.number().positive(),plannedDistanceKm:z.coerce.number().positive(),revenue:z.coerce.number().nonnegative().default(0),estimatedTollsInr:z.union([z.null(),z.coerce.number().nonnegative()]).optional().default(null),estimatedDurationMin:z.coerce.number().int().positive().optional(),routeSummary:z.string().max(300).optional(),routeProvider:z.enum(['GOOGLE','VALHALLA']).optional(),tollEstimateStatus:z.enum(['ESTIMATED','HISTORICAL_ESTIMATE','NO_TOLLS_EXPECTED','TOLLS_PRESENT_PRICE_UNKNOWN','UNAVAILABLE']).optional(),routeEstimatedAt:z.coerce.date().optional()});
 const tripLocationPointSchema=z.object({clientRequestId:z.string().trim().min(8).max(100),latitude:z.number().finite().min(-90).max(90),longitude:z.number().finite().min(-180).max(180),accuracyM:z.number().finite().nonnegative().max(5000),speedKph:z.number().finite().nonnegative().max(300).optional(),headingDeg:z.number().finite().min(0).max(360).optional(),altitudeM:z.number().finite().min(-500).max(10000).optional(),batteryPct:z.number().int().min(0).max(100).optional(),isMocked:z.boolean().optional(),capturedAt:z.coerce.date()});
 async function tripLocationSnapshot(tripId:string,organizationId:string){
-  const trip=await db.trip.findFirst({where:{id:tripId,organizationId},select:{id:true,tripNo:true,status:true,source:true,destination:true,sourceLatitude:true,sourceLongitude:true,destinationLatitude:true,destinationLongitude:true,routePolyline:true,driver:{select:{id:true,name:true,contact:true}},vehicle:{select:{id:true,name:true,registrationNo:true}}}});
+  const trip=await db.trip.findFirst({where:{id:tripId,organizationId},select:{id:true,tripNo:true,status:true,source:true,destination:true,sourceLatitude:true,sourceLongitude:true,destinationLatitude:true,destinationLongitude:true,plannedDistanceKm:true,routePolyline:true,driver:{select:{id:true,name:true,contact:true}},vehicle:{select:{id:true,name:true,registrationNo:true}}}});
   if(!trip)throw Object.assign(new Error('Trip not found'),{status:404});
-  const newest=await db.tripLocation.findMany({where:{tripId,organizationId},orderBy:{capturedAt:'desc'},take:100,select:{id:true,latitude:true,longitude:true,accuracyM:true,speedKph:true,headingDeg:true,altitudeM:true,batteryPct:true,isMocked:true,capturedAt:true,receivedAt:true}});
-  const latestLocation=newest[0]||null;
-  return {trip,trackingStatus:trackingStatus(trip.status,latestLocation?.capturedAt),latestLocation,history:newest.reverse(),serverTime:new Date()};
+  const newest=await db.tripLocation.findMany({where:{tripId,organizationId},orderBy:{capturedAt:'desc'},take:200,select:{id:true,latitude:true,longitude:true,accuracyM:true,speedKph:true,headingDeg:true,altitudeM:true,batteryPct:true,isMocked:true,capturedAt:true,receivedAt:true}});
+  const route={sourceLatitude:trip.sourceLatitude,sourceLongitude:trip.sourceLongitude,destinationLatitude:trip.destinationLatitude,destinationLongitude:trip.destinationLongitude,plannedDistanceKm:trip.plannedDistanceKm};
+  const trusted=newest.filter(point=>!locationTrustProblem(point,route)).slice(0,100);
+  const latestLocation=trusted[0]||null;
+  return {trip,trackingStatus:trackingStatus(trip.status,latestLocation?.capturedAt),latestLocation,history:trusted.reverse(),serverTime:new Date()};
 }
 app.get('/api/trips',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>res.json(await db.trip.findMany({where:{organizationId:req.user!.organizationId},include:{vehicle:true,driver:true},orderBy:{createdAt:'desc'}}))));
 app.post('/api/driver/me/trips/:id/locations',driverOnly,asyncRoute(async(req,res)=>{
@@ -460,6 +466,8 @@ app.post('/api/driver/me/trips/:id/locations',driverOnly,asyncRoute(async(req,re
   const {points}=parse(z.object({points:z.array(tripLocationPointSchema).min(1).max(50)}),req.body);
   const dispatchStartedAt=trip.dispatchedAt||trip.createdAt;
   if(points.some(point=>!locationTimestampBelongsToDispatch(point.capturedAt,dispatchStartedAt)))return res.status(422).json({message:'Location timestamps must belong to this dispatch and cannot be more than five minutes in the future'});
+  const rejectedPoint=points.find(point=>locationTrustProblem(point,{sourceLatitude:trip.sourceLatitude,sourceLongitude:trip.sourceLongitude,destinationLatitude:trip.destinationLatitude,destinationLongitude:trip.destinationLongitude,plannedDistanceKm:trip.plannedDistanceKm}));
+  if(rejectedPoint)return res.status(422).json({message:locationTrustProblem(rejectedPoint,{sourceLatitude:trip.sourceLatitude,sourceLongitude:trip.sourceLongitude,destinationLatitude:trip.destinationLatitude,destinationLongitude:trip.destinationLongitude,plannedDistanceKm:trip.plannedDistanceKm})});
   const {created,currentStatus}=await db.$transaction(async tx=>{
     const created=await tx.tripLocation.createMany({data:points.map(point=>({organizationId:req.user!.organizationId,tripId:trip.id,driverId:driver.id,...point})),skipDuplicates:true});
     let currentStatus:TripStatus=trip.status;

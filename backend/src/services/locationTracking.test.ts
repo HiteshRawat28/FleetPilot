@@ -1,6 +1,6 @@
 import { describe,expect,it } from 'vitest';
 import { TripStatus } from '@prisma/client';
-import { locationTimestampBelongsToDispatch,trackingStatus } from './locationTracking';
+import { locationTimestampBelongsToDispatch,locationTrustProblem,trackingStatus } from './locationTracking';
 
 describe('trip live-location state',()=>{
   const now=new Date('2026-09-01T12:00:00.000Z').getTime();
@@ -14,5 +14,13 @@ describe('trip live-location state',()=>{
     expect(locationTimestampBelongsToDispatch(new Date(now-45_000),dispatchedAt,now)).toBe(true);
     expect(locationTimestampBelongsToDispatch(new Date(dispatchedAt.getTime()-300_001),dispatchedAt,now)).toBe(false);
     expect(locationTimestampBelongsToDispatch(new Date(now+300_001),dispatchedAt,now)).toBe(false);
+  });
+  it('rejects mocked, inaccurate, or far-away location points',()=>{
+    const route={sourceLatitude:23.2599,sourceLongitude:77.4126,destinationLatitude:23.0225,destinationLongitude:72.5714,plannedDistanceKm:580};
+    expect(locationTrustProblem({latitude:23.1,longitude:75,accuracyM:25,isMocked:false},route)).toBeNull();
+    expect(locationTrustProblem({latitude:23.1,longitude:75,accuracyM:25,isMocked:true},route)).toContain('Mock');
+    expect(locationTrustProblem({latitude:23.1,longitude:75,accuracyM:1200,isMocked:false},route)).toContain('accuracy');
+    expect(locationTrustProblem({latitude:37.785834,longitude:-122.406417,accuracyM:5,isMocked:false},route)).toContain('supported India operating area');
+    expect(locationTrustProblem({latitude:28.61,longitude:77.2,accuracyM:5,isMocked:false},route)).toContain('planned trip corridor');
   });
 });

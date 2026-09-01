@@ -16,4 +16,12 @@ const locationTracking_1 = require("./locationTracking");
         (0, vitest_1.expect)((0, locationTracking_1.locationTimestampBelongsToDispatch)(new Date(dispatchedAt.getTime() - 300_001), dispatchedAt, now)).toBe(false);
         (0, vitest_1.expect)((0, locationTracking_1.locationTimestampBelongsToDispatch)(new Date(now + 300_001), dispatchedAt, now)).toBe(false);
     });
+    (0, vitest_1.it)('rejects mocked, inaccurate, or far-away location points', () => {
+        const route = { sourceLatitude: 23.2599, sourceLongitude: 77.4126, destinationLatitude: 23.0225, destinationLongitude: 72.5714, plannedDistanceKm: 580 };
+        (0, vitest_1.expect)((0, locationTracking_1.locationTrustProblem)({ latitude: 23.1, longitude: 75, accuracyM: 25, isMocked: false }, route)).toBeNull();
+        (0, vitest_1.expect)((0, locationTracking_1.locationTrustProblem)({ latitude: 23.1, longitude: 75, accuracyM: 25, isMocked: true }, route)).toContain('Mock');
+        (0, vitest_1.expect)((0, locationTracking_1.locationTrustProblem)({ latitude: 23.1, longitude: 75, accuracyM: 1200, isMocked: false }, route)).toContain('accuracy');
+        (0, vitest_1.expect)((0, locationTracking_1.locationTrustProblem)({ latitude: 37.785834, longitude: -122.406417, accuracyM: 5, isMocked: false }, route)).toContain('supported India operating area');
+        (0, vitest_1.expect)((0, locationTracking_1.locationTrustProblem)({ latitude: 28.61, longitude: 77.2, accuracyM: 5, isMocked: false }, route)).toContain('planned trip corridor');
+    });
 });

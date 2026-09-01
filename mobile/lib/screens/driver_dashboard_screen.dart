@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -23,12 +25,22 @@ class DriverDashboardScreen extends StatefulWidget {
 class _DriverDashboardScreenState extends State<DriverDashboardScreen> {
   DriverDashboard? _dashboard;
   String? _error;
+  String? _trackingMessage;
   bool _busy = false;
+  bool _tracking = false;
+  StreamSubscription<Position>? _positionSub;
+  String? _trackingTripId;
 
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _positionSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -41,12 +53,125 @@ class _DriverDashboardScreenState extends State<DriverDashboardScreen> {
           await context.read<ApiClient>().get('/driver/me/dashboard')
               as Map<String, dynamic>;
       if (mounted) {
-        setState(() => _dashboard = DriverDashboard.fromJson(data));
+        final dashboard = DriverDashboard.fromJson(data);
+        setState(() => _dashboard = dashboard);
+        unawaited(_syncLocationTracking(dashboard));
       }
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Trip? _activeTrip(DriverDashboard dashboard) => dashboard.trips
+      .where((trip) => trip.status == 'DISPATCHED' || trip.status == 'IN_PROGRESS')
+      .firstOrNull;
+
+  Future<void> _syncLocationTracking(DriverDashboard dashboard) async {
+    final trip = _activeTrip(dashboard);
+    if (trip == null) {
+      await _stopLocationTracking('No active trip currently assigned.');
+      return;
+    }
+    if (_trackingTripId == trip.id && _tracking) return;
+    await _positionSub?.cancel();
+    _positionSub = null;
+    _trackingTripId = trip.id;
+    setState(() {
+      _tracking = false;
+      _trackingMessage = 'Starting live location for ${trip.tripNo}…';
+    });
+    try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        setState(() => _trackingMessage = 'Turn on phone location services to share this trip position.');
+        return;
+      }
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied) {
+        setState(() => _trackingMessage = 'Location permission is required for dispatcher live tracking.');
+        return;
+      }
+      if (permission == LocationPermission.deniedForever) {
+        setState(() => _trackingMessage = 'Location permission is blocked. Enable it from app settings.');
+        return;
+      }
+      final current = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 12),
+        ),
+      );
+      await _sendLocation(trip, current);
+      _positionSub = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          distanceFilter: 15,
+        ),
+      ).listen(
+        (position) => unawaited(_sendLocation(trip, position)),
+        onError: (error) {
+          if (mounted) setState(() => _trackingMessage = 'Live location paused: $error');
+        },
+      );
+      if (mounted) {
+        setState(() {
+          _tracking = true;
+          _trackingMessage = 'Live location sharing is active for ${trip.tripNo}.';
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => _trackingMessage = 'Could not start live location: $error');
+    }
+  }
+
+  Future<void> _stopLocationTracking(String message) async {
+    await _positionSub?.cancel();
+    _positionSub = null;
+    _trackingTripId = null;
+    if (mounted) {
+      setState(() {
+        _tracking = false;
+        _trackingMessage = message;
+      });
+    }
+  }
+
+  Future<void> _sendLocation(Trip trip, Position position) async {
+    final capturedAt = position.timestamp.toUtc();
+    final body = {
+      'points': [
+        {
+          'clientRequestId':
+              '${trip.id}-${capturedAt.microsecondsSinceEpoch}-${position.latitude.toStringAsFixed(6)}-${position.longitude.toStringAsFixed(6)}',
+          'latitude': position.latitude,
+          'longitude': position.longitude,
+          'accuracyM': position.accuracy,
+          if (position.speed >= 0) 'speedKph': position.speed * 3.6,
+          if (position.heading >= 0 && position.heading <= 360)
+            'headingDeg': position.heading,
+          'altitudeM': position.altitude,
+          'isMocked': position.isMocked,
+          'capturedAt': capturedAt.toIso8601String(),
+        },
+      ],
+    };
+    try {
+      await context.read<ApiClient>().post('/driver/me/trips/${trip.id}/locations', body);
+      if (mounted) {
+        setState(() {
+          _tracking = true;
+          _trackingMessage = position.isMocked
+              ? 'Mock location was detected and rejected by dispatch.'
+              : 'Latest location sent for ${trip.tripNo}.';
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => _trackingMessage = 'Location update failed: $error');
     }
   }
 
@@ -83,9 +208,7 @@ class _DriverDashboardScreenState extends State<DriverDashboardScreen> {
   Widget build(BuildContext context) {
     final dashboard = _dashboard;
     final profile = dashboard?.profile ?? widget.initialProfile;
-    final activeTrip = dashboard?.trips
-        .where((trip) => trip.status == 'DISPATCHED')
-        .firstOrNull;
+    final activeTrip = dashboard == null ? null : _activeTrip(dashboard);
     return Scaffold(
       appBar: GlassAppBar(
         title: const Text('Driver workspace'),
@@ -117,6 +240,15 @@ class _DriverDashboardScreenState extends State<DriverDashboardScreen> {
               )
             else ...[
               _TripCard(trip: activeTrip),
+              const SizedBox(height: 12),
+              _LocationTrackingCard(
+                activeTrip: activeTrip,
+                tracking: _tracking,
+                message: _trackingMessage,
+                onRetry: dashboard == null
+                    ? null
+                    : () => _syncLocationTracking(dashboard),
+              ),
               const SizedBox(height: 16),
               GlassCard(
                 child: Padding(
@@ -215,6 +347,70 @@ class _TripCard extends StatelessWidget {
             ),
     ),
   );
+}
+
+class _LocationTrackingCard extends StatelessWidget {
+  const _LocationTrackingCard({
+    required this.activeTrip,
+    required this.tracking,
+    required this.message,
+    required this.onRetry,
+  });
+
+  final Trip? activeTrip;
+  final bool tracking;
+  final String? message;
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasTrip = activeTrip != null;
+    final color = tracking
+        ? AppColors.green
+        : hasTrip
+        ? AppColors.orange
+        : AppColors.muted;
+    return GlassCard(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Row(
+          children: [
+            CircleAvatar(
+              backgroundColor: color.withValues(alpha: .12),
+              child: Icon(
+                tracking
+                    ? Icons.location_on_outlined
+                    : Icons.location_searching_outlined,
+                color: color,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    tracking ? 'Live location active' : 'Live location',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    message ??
+                        (hasTrip
+                            ? 'Preparing live tracking for ${activeTrip!.tripNo}.'
+                            : 'Tracking starts automatically when a trip is dispatched.'),
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+            if (hasTrip && !tracking && onRetry != null)
+              TextButton(onPressed: onRetry, child: const Text('Retry')),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _ExpenseTile extends StatelessWidget {

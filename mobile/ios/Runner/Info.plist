@@ -15,6 +15,8 @@
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>TransitOps uses the camera to capture your profile photo and driving licence.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>TransitOps uses your location while an assigned trip is active so dispatchers can see live driver tracking.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>TransitOps uses selected photos for your driver profile and licence verification.</string>
 	<key>CFBundleExecutable</key>

@@ -14,9 +14,11 @@
     "db:upgrade:trip-dispatch": "prisma db execute --schema prisma/schema.prisma --file prisma/upgrade-trip-dispatch-fastag.sql && prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:seed": "tsx prisma/seed.ts",
+    "db:seed:integration": "tsx prisma/seed-integration.ts",
     "db:seed:chatbot": "tsx prisma/seed-chatbot-test-data.ts",
     "db:clean:chatbot": "tsx prisma/seed-chatbot-test-data.ts --clean",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration": "vitest run src/integration/driverLiveLocation.integration.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1121.0",
