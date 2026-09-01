@@ -43,7 +43,8 @@ function parseReceiptText(rawText, confidence = 0) {
     const litersMatches = [...text.matchAll(/\b([0-9]{1,4}(?:[.,][0-9]{1,3})?)\s*(?:L|LTR|LITRE|LITER|LITRES|LITERS)\b/g)].map(match => Number(match[1].replace(',', '.'))).filter(value => Number.isFinite(value) && value > 0);
     const dates = [...text.matchAll(/\b\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4}\b/g)].map(match => parseDate(match[0])).filter((date) => Boolean(date));
     const vendor = lines.find(line => line.length >= 3 && line.length <= 80 && !/INVOICE|RECEIPT|TAX|GST|CASH MEMO|BILL/.test(line));
-    return { amount: amounts.length ? Math.max(...amounts) : undefined, liters: litersMatches[0], vendor, date: dates[0]?.toISOString(), rawText, confidence: Math.round(confidence) };
+    const expenseType = /TOLL|FASTAG/.test(text) ? 'TOLL' : /REPAIR|SERVICE|WORKSHOP|SPARE|TYRE|TIRE/.test(text) ? 'REPAIR' : /INSURANCE|POLICY|PREMIUM/.test(text) ? 'INSURANCE' : 'OTHER';
+    return { amount: amounts.length ? Math.max(...amounts) : undefined, liters: litersMatches[0], vendor, date: dates[0]?.toISOString(), expenseType, rawText, confidence: Math.round(confidence) };
 }
 async function extractReceipt(buffer) {
     const result = await (0, tesseract_js_1.recognize)(buffer, 'eng');

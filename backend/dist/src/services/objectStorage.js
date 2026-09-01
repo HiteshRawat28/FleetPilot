@@ -1,11 +1,18 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.objectStorageConfigured = objectStorageConfigured;
 exports.uploadPrivateObject = uploadPrivateObject;
 exports.signedObjectUrl = signedObjectUrl;
+require("dotenv/config");
+const dotenv_1 = __importDefault(require("dotenv"));
 const client_s3_1 = require("@aws-sdk/client-s3");
 const s3_request_presigner_1 = require("@aws-sdk/s3-request-presigner");
 const node_crypto_1 = require("node:crypto");
+// Local development keeps shared infrastructure secrets in the repository root.
+dotenv_1.default.config({ path: '../.env', quiet: true });
 const accountId = process.env.R2_ACCOUNT_ID || '';
 const accessKeyId = process.env.R2_ACCESS_KEY_ID || '';
 const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY || '';

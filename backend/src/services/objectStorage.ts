@@ -1,6 +1,11 @@
+import 'dotenv/config';
+import dotenv from 'dotenv';
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { randomUUID } from 'node:crypto';
+
+// Local development keeps shared infrastructure secrets in the repository root.
+dotenv.config({ path: '../.env', quiet: true });
 
 const accountId=process.env.R2_ACCOUNT_ID||'';
 const accessKeyId=process.env.R2_ACCESS_KEY_ID||'';
