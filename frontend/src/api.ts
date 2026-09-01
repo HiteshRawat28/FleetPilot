@@ -10,6 +10,6 @@ localStorage.removeItem('transitops_token');
 export function clearClientSession(){localStorage.removeItem('transitops_token');for(let index=sessionStorage.length-1;index>=0;index--){const key=sessionStorage.key(index);if(key?.startsWith('fleetpilot_copilot_'))sessionStorage.removeItem(key)}}
 export async function api<T=any>(path:string,options:RequestInit={}):Promise<T>{
   let response:Response;try{response=await fetch(`${API_URL}${path}`,{...options,credentials:'include',headers:{...(options.body instanceof FormData?{}:{'Content-Type':'application/json'}),...options.headers}})}catch{throw new ApiError(`Cannot reach the FleetPilot API at ${API_URL}. Start the backend and try again.`,0,'NETWORK_ERROR')}
-  if(!response.ok){let message=`Request failed (${response.status})`,code:string|undefined,reasons:ApiFailureReason[]=[];try{const body=await response.json();message=body.message||message;code=body.code;reasons=Array.isArray(body.reasons)?body.reasons:[]}catch{}throw new ApiError(message,response.status,code,reasons)}
+  if(!response.ok){let message=`Request failed (${response.status})`,code:string|undefined,reasons:ApiFailureReason[]=[];try{const body=await response.json();message=body.message||message;code=body.code;reasons=Array.isArray(body.reasons)?body.reasons:[]}catch{}if(response.status===401){clearClientSession();window.dispatchEvent(new CustomEvent('fleetpilot:auth-expired',{detail:{message}}))}throw new ApiError(message,response.status,code,reasons)}
   if(response.status===204)return undefined as T; return response.json();
 }
