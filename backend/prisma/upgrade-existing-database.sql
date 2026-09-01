@@ -9,6 +9,13 @@ COMMIT;
 
 BEGIN;
 
+DO $$
+BEGIN
+  CREATE TYPE "LicenseCategory" AS ENUM ('LMV', 'HMV', 'MCWG');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
 CREATE TABLE IF NOT EXISTS "Organization" (
   "id" TEXT NOT NULL,
   "name" TEXT NOT NULL,
@@ -39,6 +46,8 @@ ALTER TABLE "User"
   ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
 
 ALTER TABLE "Vehicle" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
+ALTER TABLE "Vehicle"
+  ADD COLUMN IF NOT EXISTS "requiredLicenseCategory" "LicenseCategory" NOT NULL DEFAULT 'LMV';
 ALTER TABLE "Driver" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
 ALTER TABLE "Trip" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
 ALTER TABLE "Maintenance" ADD COLUMN IF NOT EXISTS "organizationId" TEXT;
