@@ -82,4 +82,29 @@ describe('Copilot tenant and field enforcement at the tool boundary',()=>{
     expect(result.data).toMatchObject({driverMatches:['Alex (LMV)','Alex (HMV)']});
     expect(JSON.stringify(result.data)).not.toContain('LIC-PRIVATE');
   });
+
+  it('rejects maintenance preparation for a dispatcher before database access',async()=>{
+    let queried=false;const fakeDb={vehicle:{findMany:async()=>{queried=true;return[]}}};
+    await expect(executeTool(fakeDb as unknown as PrismaClient,user,'prepare_maintenance',{vehicleQuery:null})).rejects.toMatchObject({status:403});
+    expect(queried).toBe(false);
+  });
+
+  it('scopes maintenance handoffs to the authenticated tenant and keeps ids out of Groq data',async()=>{
+    let where:Record<string,unknown>|undefined;const manager={...user,role:Role.FLEET_MANAGER};
+    const fakeDb={vehicle:{findMany:async(args:{where:Record<string,unknown>})=>{where=args.where;return[{id:'vehicle-private-id',name:'Van A',registrationNo:'REG-A',status:'AVAILABLE',odometerKm:50000,maintenance:[]}]}}};
+    const result=await executeTool(fakeDb as unknown as PrismaClient,manager,'prepare_maintenance',{vehicleQuery:'Van A',organizationId:'tenant-b'});
+    expect(where).toMatchObject({organizationId:'tenant-a',status:'AVAILABLE'});
+    expect(JSON.stringify(result.data)).not.toContain('vehicle-private-id');
+    expect(JSON.stringify(result.evidence)).not.toContain('vehicle-private-id');
+    expect(result.handoffs?.[0]).toMatchObject({type:'OPEN_MAINTENANCE_FORM',payload:{vehicleId:'vehicle-private-id',vehicleName:'Van A'}});
+  });
+
+  it('does not let finance preparation execute a write and omits ids from model-visible data',async()=>{
+    const analyst={...user,role:Role.FINANCIAL_ANALYST};let writes=0;
+    const fakeDb={vehicle:{findMany:async()=>[{id:'vehicle-private-id',name:'Truck A',registrationNo:'REG-T',status:'AVAILABLE',odometerKm:70000}]},fuelLog:{create:async()=>{writes+=1}}};
+    const result=await executeTool(fakeDb as unknown as PrismaClient,analyst,'prepare_fuel_entry',{vehicleQuery:'Truck A',liters:50,cost:5000,odometerKm:70050});
+    expect(writes).toBe(0);
+    expect(JSON.stringify(result.data)).not.toContain('vehicle-private-id');
+    expect(result.handoffs?.[0]).toMatchObject({type:'OPEN_FUEL_FORM',payload:{vehicleId:'vehicle-private-id',liters:50,cost:5000,odometerKm:70050}});
+  });
 });

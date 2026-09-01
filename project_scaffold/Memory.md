@@ -39,6 +39,14 @@
 
 ## Milestone log
 
+### 2026-09-01 — Guarded Copilot operations workflows
+
+- Added deterministic guided routing for assignment review, replacement recommendations, safe cargo matching, maintenance candidates, licence renewals, weekly reports, utilization diagnostics, and fuel-entry preparation so these workflows do not depend on Groq correctly selecting an intent.
+- Assignment workflows remain read-only and respect the schema invariant that every saved trip already has a vehicle and driver; draft or active trips can be selected for eligibility review and compatible replacement suggestions.
+- Maintenance and fuel workflows return one-time browser handoffs to the existing protected forms. They never execute a write, their payloads are excluded from session history and Groq-visible tool data, and the normal API revalidates role, organization, and record state on save.
+- Weekly reporting uses a fixed seven-day window. Utilization diagnostics label seven-day dispatch comparisons as an activity proxy because historical vehicle-status snapshots are not stored.
+- Added clickable evidence follow-ups, role-scoped workflow starters, and 8 guided-intent/security assertions; the backend suite now has 62 passing tests across 9 files.
+
 ### 2026-09-01 — Dashboard manual trip shortcut
 
 - Connected the dashboard `New trip` action to the existing Trip dispatch workflow, where it opens the full manual trip planner immediately after navigation.
