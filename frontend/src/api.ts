@@ -1,4 +1,13 @@
-export const API_URL=import.meta.env.VITE_API_URL||'http://localhost:4000/api';
+const configuredApiUrl=import.meta.env.VITE_API_URL||'http://localhost:4000/api';
+const loopbackHosts=new Set(['localhost','127.0.0.1']);
+function normalizedApiUrl(url:string){
+  try{
+    const parsed=new URL(url);
+    if(typeof window!=='undefined'&&loopbackHosts.has(parsed.hostname)&&loopbackHosts.has(window.location.hostname))parsed.hostname=window.location.hostname;
+    return parsed.toString().replace(/\/$/,'');
+  }catch{return url.replace(/\/$/,'')}
+}
+export const API_URL=normalizedApiUrl(configuredApiUrl);
 export type Role='OWNER'|'ADMIN'|'FLEET_MANAGER'|'DISPATCHER'|'SAFETY_OFFICER'|'FINANCIAL_ANALYST'|'DRIVER';
 export type User={id:string;name:string;email:string;phone?:string|null;jobTitle?:string|null;avatarUrl?:string|null;role:Role;organizationId:string;organizationName:string;mustChangePassword?:boolean;driverId?:string|null;onboardingStatus?:string|null};
 export type ApiFailureReason={code:string;message:string;field?:string;details?:Record<string,string|number>};
