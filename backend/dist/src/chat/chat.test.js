@@ -12,7 +12,7 @@ const chat_1 = require("./chat");
     });
     (0, vitest_1.it)('limits dispatchers to operational and assignment data', () => {
         (0, vitest_1.expect)((0, chat_1.toolNamesForRole)(client_1.Role.DISPATCHER)).toEqual([
-            'get_fleet_summary', 'search_vehicles', 'search_drivers', 'search_trips', 'check_assignment', 'recommend_assignment'
+            'get_fleet_summary', 'search_vehicles', 'search_drivers', 'search_trips', 'check_assignment', 'recommend_assignment', 'guide_trip_assignment'
         ]);
     });
     (0, vitest_1.it)('does not expose finance or trip tools to safety officers', () => {
@@ -22,8 +22,14 @@ const chat_1 = require("./chat");
     });
     (0, vitest_1.it)('limits financial analysts to summary, finance, and approved analytics', () => {
         (0, vitest_1.expect)((0, chat_1.toolNamesForRole)(client_1.Role.FINANCIAL_ANALYST)).toEqual([
-            'get_fleet_summary', 'get_finance_summary', 'get_analytics'
+            'get_fleet_summary', 'get_finance_summary', 'get_analytics', 'get_weekly_operations_report', 'get_utilization_diagnostics', 'prepare_fuel_entry'
         ]);
+    });
+    (0, vitest_1.it)('keeps guided form preparation aligned with the existing module permissions', () => {
+        (0, vitest_1.expect)((0, chat_1.toolNamesForRole)(client_1.Role.FLEET_MANAGER)).toEqual(vitest_1.expect.arrayContaining(['guide_trip_assignment', 'prepare_maintenance', 'prepare_fuel_entry']));
+        (0, vitest_1.expect)((0, chat_1.toolNamesForRole)(client_1.Role.DISPATCHER)).not.toContain('prepare_maintenance');
+        (0, vitest_1.expect)((0, chat_1.toolNamesForRole)(client_1.Role.DISPATCHER)).not.toContain('prepare_fuel_entry');
+        (0, vitest_1.expect)((0, chat_1.toolNamesForRole)(client_1.Role.SAFETY_OFFICER)).not.toContain('prepare_fuel_entry');
     });
 });
 (0, vitest_1.describe)('Groq response text extraction', () => {
@@ -35,6 +41,18 @@ const chat_1 = require("./chat");
                 { type: 'reasoning', content: [{ type: 'reasoning_text', text: 'Internal reasoning must stay hidden.' }] },
                 { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'No active trips today.' }] }
             ] })).toBe('No active trips today.');
+    });
+});
+(0, vitest_1.describe)('Deterministic guided workflow routing', () => {
+    (0, vitest_1.it)('routes every supported workflow without depending on model intent selection', () => {
+        (0, vitest_1.expect)((0, chat_1.guidedWorkflowForMessage)('Help me assign this unassigned trip')?.name).toBe('guide_trip_assignment');
+        (0, vitest_1.expect)((0, chat_1.guidedWorkflowForMessage)('Find a replacement driver for trip TRP0008')).toMatchObject({ name: 'guide_trip_assignment', args: { tripQuery: 'TRP0008' } });
+        (0, vitest_1.expect)((0, chat_1.guidedWorkflowForMessage)('Which vehicle can safely carry 4,000 kg?')).toMatchObject({ name: 'recommend_assignment', args: { cargoWeightKg: 4000 } });
+        (0, vitest_1.expect)((0, chat_1.guidedWorkflowForMessage)('Prepare maintenance for vehicles due for service')?.name).toBe('prepare_maintenance');
+        (0, vitest_1.expect)((0, chat_1.guidedWorkflowForMessage)('Show licence renewals required this month')?.name).toBe('search_drivers');
+        (0, vitest_1.expect)((0, chat_1.guidedWorkflowForMessage)('Build a weekly operations report')?.name).toBe('get_weekly_operations_report');
+        (0, vitest_1.expect)((0, chat_1.guidedWorkflowForMessage)('Explain why fleet utilization decreased')?.name).toBe('get_utilization_diagnostics');
+        (0, vitest_1.expect)((0, chat_1.guidedWorkflowForMessage)('Prepare a fuel entry for vehicle Truck A with 50 L and cost ₹5,000')).toMatchObject({ name: 'prepare_fuel_entry', args: { vehicleQuery: 'Truck A', liters: 50, cost: 5000 } });
     });
 });
 (0, vitest_1.describe)('Groq error sanitization', () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Role } from '@prisma/client';
-import { extractResponseText,groqFailure,toolNamesForRole,validateActionClaim } from './chat';
+import { extractResponseText,groqFailure,guidedWorkflowForMessage,toolNamesForRole,validateActionClaim } from './chat';
 
 describe('FleetPilot Copilot role tools',()=>{
   it('gives organization owners and administrators the guarded trip creation tool',()=>{
@@ -11,7 +11,7 @@ describe('FleetPilot Copilot role tools',()=>{
 
   it('limits dispatchers to operational and assignment data',()=>{
     expect(toolNamesForRole(Role.DISPATCHER)).toEqual([
-      'get_fleet_summary','search_vehicles','search_drivers','search_trips','check_assignment','recommend_assignment'
+      'get_fleet_summary','search_vehicles','search_drivers','search_trips','check_assignment','recommend_assignment','guide_trip_assignment'
     ]);
   });
 
@@ -23,8 +23,15 @@ describe('FleetPilot Copilot role tools',()=>{
 
   it('limits financial analysts to summary, finance, and approved analytics',()=>{
     expect(toolNamesForRole(Role.FINANCIAL_ANALYST)).toEqual([
-      'get_fleet_summary','get_finance_summary','get_analytics'
+      'get_fleet_summary','get_finance_summary','get_analytics','get_weekly_operations_report','get_utilization_diagnostics','prepare_fuel_entry'
     ]);
+  });
+
+  it('keeps guided form preparation aligned with the existing module permissions',()=>{
+    expect(toolNamesForRole(Role.FLEET_MANAGER)).toEqual(expect.arrayContaining(['guide_trip_assignment','prepare_maintenance','prepare_fuel_entry']));
+    expect(toolNamesForRole(Role.DISPATCHER)).not.toContain('prepare_maintenance');
+    expect(toolNamesForRole(Role.DISPATCHER)).not.toContain('prepare_fuel_entry');
+    expect(toolNamesForRole(Role.SAFETY_OFFICER)).not.toContain('prepare_fuel_entry');
   });
 });
 
@@ -38,6 +45,19 @@ describe('Groq response text extraction',()=>{
       {type:'reasoning',content:[{type:'reasoning_text',text:'Internal reasoning must stay hidden.'}]},
       {type:'message',role:'assistant',content:[{type:'output_text',text:'No active trips today.'}]}
     ]})).toBe('No active trips today.');
+  });
+});
+
+describe('Deterministic guided workflow routing',()=>{
+  it('routes every supported workflow without depending on model intent selection',()=>{
+    expect(guidedWorkflowForMessage('Help me assign this unassigned trip')?.name).toBe('guide_trip_assignment');
+    expect(guidedWorkflowForMessage('Find a replacement driver for trip TRP0008')).toMatchObject({name:'guide_trip_assignment',args:{tripQuery:'TRP0008'}});
+    expect(guidedWorkflowForMessage('Which vehicle can safely carry 4,000 kg?')).toMatchObject({name:'recommend_assignment',args:{cargoWeightKg:4000}});
+    expect(guidedWorkflowForMessage('Prepare maintenance for vehicles due for service')?.name).toBe('prepare_maintenance');
+    expect(guidedWorkflowForMessage('Show licence renewals required this month')?.name).toBe('search_drivers');
+    expect(guidedWorkflowForMessage('Build a weekly operations report')?.name).toBe('get_weekly_operations_report');
+    expect(guidedWorkflowForMessage('Explain why fleet utilization decreased')?.name).toBe('get_utilization_diagnostics');
+    expect(guidedWorkflowForMessage('Prepare a fuel entry for vehicle Truck A with 50 L and cost ₹5,000')).toMatchObject({name:'prepare_fuel_entry',args:{vehicleQuery:'Truck A',liters:50,cost:5000}});
   });
 });
 

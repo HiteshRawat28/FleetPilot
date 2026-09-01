@@ -72,4 +72,29 @@ const trip = { tripNo: 'TRP001', source: 'A', destination: 'B', status: 'DRAFT',
         (0, vitest_1.expect)(result.data).toMatchObject({ driverMatches: ['Alex (LMV)', 'Alex (HMV)'] });
         (0, vitest_1.expect)(JSON.stringify(result.data)).not.toContain('LIC-PRIVATE');
     });
+    (0, vitest_1.it)('rejects maintenance preparation for a dispatcher before database access', async () => {
+        let queried = false;
+        const fakeDb = { vehicle: { findMany: async () => { queried = true; return []; } } };
+        await (0, vitest_1.expect)((0, chat_1.executeTool)(fakeDb, user, 'prepare_maintenance', { vehicleQuery: null })).rejects.toMatchObject({ status: 403 });
+        (0, vitest_1.expect)(queried).toBe(false);
+    });
+    (0, vitest_1.it)('scopes maintenance handoffs to the authenticated tenant and keeps ids out of Groq data', async () => {
+        let where;
+        const manager = { ...user, role: client_1.Role.FLEET_MANAGER };
+        const fakeDb = { vehicle: { findMany: async (args) => { where = args.where; return [{ id: 'vehicle-private-id', name: 'Van A', registrationNo: 'REG-A', status: 'AVAILABLE', odometerKm: 50000, maintenance: [] }]; } } };
+        const result = await (0, chat_1.executeTool)(fakeDb, manager, 'prepare_maintenance', { vehicleQuery: 'Van A', organizationId: 'tenant-b' });
+        (0, vitest_1.expect)(where).toMatchObject({ organizationId: 'tenant-a', status: 'AVAILABLE' });
+        (0, vitest_1.expect)(JSON.stringify(result.data)).not.toContain('vehicle-private-id');
+        (0, vitest_1.expect)(JSON.stringify(result.evidence)).not.toContain('vehicle-private-id');
+        (0, vitest_1.expect)(result.handoffs?.[0]).toMatchObject({ type: 'OPEN_MAINTENANCE_FORM', payload: { vehicleId: 'vehicle-private-id', vehicleName: 'Van A' } });
+    });
+    (0, vitest_1.it)('does not let finance preparation execute a write and omits ids from model-visible data', async () => {
+        const analyst = { ...user, role: client_1.Role.FINANCIAL_ANALYST };
+        let writes = 0;
+        const fakeDb = { vehicle: { findMany: async () => [{ id: 'vehicle-private-id', name: 'Truck A', registrationNo: 'REG-T', status: 'AVAILABLE', odometerKm: 70000 }] }, fuelLog: { create: async () => { writes += 1; } } };
+        const result = await (0, chat_1.executeTool)(fakeDb, analyst, 'prepare_fuel_entry', { vehicleQuery: 'Truck A', liters: 50, cost: 5000, odometerKm: 70050 });
+        (0, vitest_1.expect)(writes).toBe(0);
+        (0, vitest_1.expect)(JSON.stringify(result.data)).not.toContain('vehicle-private-id');
+        (0, vitest_1.expect)(result.handoffs?.[0]).toMatchObject({ type: 'OPEN_FUEL_FORM', payload: { vehicleId: 'vehicle-private-id', liters: 50, cost: 5000, odometerKm: 70050 } });
+    });
 });
