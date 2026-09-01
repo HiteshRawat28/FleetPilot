@@ -23,6 +23,7 @@ const ocr_1 = require("./services/ocr");
 const security_1 = require("./chat/security");
 const session_1 = require("./auth/session");
 const locationTracking_1 = require("./services/locationTracking");
+const notificationAudience_1 = require("./services/notificationAudience");
 const db = new client_1.PrismaClient();
 const app = (0, express_1.default)();
 const PORT = Number(process.env.PORT || 4000);
@@ -80,6 +81,13 @@ const idParam = (req) => String(req.params.id);
 const slugify = (name) => name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 45);
 const moneyForLog = (amount) => `INR ${Math.round(amount).toLocaleString('en-IN')}`;
 const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email, phone: user.phone, jobTitle: user.jobTitle, role: user.role, organizationId: user.organizationId, organizationName: user.organization.name, driverId: user.driver?.id || null, onboardingStatus: user.driver?.onboardingStatus || null, mustChangePassword: user.mustChangePassword });
+async function notifyTripUsers(client, input) {
+    const users = await client.user.findMany({ where: { organizationId: input.organizationId, isActive: true }, select: { id: true, role: true, driver: { select: { id: true } } } });
+    const recipients = users.filter(user => (0, notificationAudience_1.receivesTripNotification)(user.role, user.driver?.id || null, input.assignedDriverId || null));
+    if (!recipients.length)
+        return;
+    await client.notification.createMany({ data: recipients.map(user => ({ organizationId: input.organizationId, userId: user.id, type: input.type, title: input.title, message: input.message, tripId: input.tripId })) });
+}
 const sendSession = (res, user, status = 200) => { res.cookie(session_1.SESSION_COOKIE, jsonwebtoken_1.default.sign(user, SECRET, { expiresIn: '8h' }), cookieOptions); res.setHeader('Cache-Control', 'no-store'); return res.status(status).json({ user }); };
 const modulesByRole = {
     OWNER: ['Overview', 'Fleet registry', 'Drivers', 'Driver access', 'Trip dispatch', 'Profitability', 'Maintenance', 'Fuel & expenses', 'Reports', 'Company settings', 'User access'],
@@ -202,6 +210,26 @@ app.post('/api/auth/change-password', asyncRoute(async (req, res) => {
 }));
 app.use('/api/chat', (0, chat_1.createChatRouter)(db));
 app.get('/api/profile', asyncRoute(async (req, res) => res.json(await profileResponse(req.user.id))));
+app.get('/api/notifications', asyncRoute(async (req, res) => {
+    const limit = parse(zod_1.z.coerce.number().int().min(1).max(50), req.query.limit || 20);
+    const where = { organizationId: req.user.organizationId, userId: req.user.id };
+    const [items, unreadCount] = await Promise.all([
+        db.notification.findMany({ where, select: { id: true, type: true, title: true, message: true, tripId: true, readAt: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: limit }),
+        db.notification.count({ where: { ...where, readAt: null } })
+    ]);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ items, unreadCount });
+}));
+app.post('/api/notifications/read-all', asyncRoute(async (req, res) => {
+    await db.notification.updateMany({ where: { organizationId: req.user.organizationId, userId: req.user.id, readAt: null }, data: { readAt: new Date() } });
+    res.status(204).end();
+}));
+app.post('/api/notifications/:id/read', asyncRoute(async (req, res) => {
+    const result = await db.notification.updateMany({ where: { id: idParam(req), organizationId: req.user.organizationId, userId: req.user.id, readAt: null }, data: { readAt: new Date() } });
+    if (!result.count && !(await db.notification.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId, userId: req.user.id }, select: { id: true } })))
+        throw Object.assign(new Error('Notification not found'), { status: 404 });
+    res.status(204).end();
+}));
 app.get('/api/search', asyncRoute(async (req, res) => {
     const query = String(req.query.q || '').trim().slice(0, 80);
     if (query.length < 2)
@@ -491,10 +519,17 @@ app.post('/api/driver/me/trips/:id/locations', driverOnly, asyncRoute(async (req
     const dispatchStartedAt = trip.dispatchedAt || trip.createdAt;
     if (points.some(point => !(0, locationTracking_1.locationTimestampBelongsToDispatch)(point.capturedAt, dispatchStartedAt)))
         return res.status(422).json({ message: 'Location timestamps must belong to this dispatch and cannot be more than five minutes in the future' });
-    const created = await db.tripLocation.createMany({ data: points.map(point => ({ organizationId: req.user.organizationId, tripId: trip.id, driverId: driver.id, ...point })), skipDuplicates: true });
-    const currentStatus = created.count > 0 && trip.status === client_1.TripStatus.DISPATCHED
-        ? (await db.trip.update({ where: { id: trip.id }, data: { status: client_1.TripStatus.IN_PROGRESS, startedAt: trip.startedAt || new Date() } })).status
-        : trip.status;
+    const { created, currentStatus } = await db.$transaction(async (tx) => {
+        const created = await tx.tripLocation.createMany({ data: points.map(point => ({ organizationId: req.user.organizationId, tripId: trip.id, driverId: driver.id, ...point })), skipDuplicates: true });
+        let currentStatus = trip.status;
+        if (created.count > 0 && trip.status === client_1.TripStatus.DISPATCHED) {
+            const changed = await tx.trip.updateMany({ where: { id: trip.id, status: client_1.TripStatus.DISPATCHED }, data: { status: client_1.TripStatus.IN_PROGRESS, startedAt: trip.startedAt || new Date() } });
+            if (changed.count)
+                await notifyTripUsers(tx, { organizationId: req.user.organizationId, tripId: trip.id, assignedDriverId: driver.id, type: client_1.NotificationType.TRIP_STARTED, title: `${trip.tripNo} started`, message: `${driver.name} started the trip from ${trip.source} to ${trip.destination}.` });
+            currentStatus = changed.count ? client_1.TripStatus.IN_PROGRESS : (await tx.trip.findUnique({ where: { id: trip.id }, select: { status: true } }))?.status || client_1.TripStatus.IN_PROGRESS;
+        }
+        return { created, currentStatus };
+    });
     const latestLocation = await db.tripLocation.findFirst({ where: { tripId: trip.id, organizationId: req.user.organizationId }, orderBy: { capturedAt: 'desc' }, select: { id: true, latitude: true, longitude: true, accuracyM: true, speedKph: true, headingDeg: true, altitudeM: true, batteryPct: true, isMocked: true, capturedAt: true, receivedAt: true } });
     if (latestLocation)
         publishTripLocation(trip.id, { type: 'LOCATION_UPDATE', tripId: trip.id, tripStatus: currentStatus, trackingStatus: (0, locationTracking_1.trackingStatus)(currentStatus, latestLocation.capturedAt), location: latestLocation, serverTime: new Date() });
@@ -635,7 +670,12 @@ app.post('/api/trips', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAG
     (0, assignmentEligibility_1.assertAssignmentEligible)({ ...context, cargoWeightKg: data.cargoWeightKg });
     const tripNo = `TRP${String((await db.trip.count({ where: { organizationId: req.user.organizationId } })) + 1).padStart(4, '0')}`;
     const estimate = await estimateTripProfitability(req.user.organizationId, { vehicleId: data.vehicleId, plannedDistanceKm: data.plannedDistanceKm, revenue: data.revenue, estimatedTollsInr: data.estimatedTollsInr });
-    res.status(201).json(await db.trip.create({ data: { ...data, ...estimatedProfitabilityData(estimate), tripNo, organizationId: req.user.organizationId }, include: { vehicle: true, driver: true } }));
+    const result = await db.$transaction(async (tx) => {
+        const created = await tx.trip.create({ data: { ...data, ...estimatedProfitabilityData(estimate), tripNo, organizationId: req.user.organizationId }, include: { vehicle: true, driver: true } });
+        await notifyTripUsers(tx, { organizationId: req.user.organizationId, tripId: created.id, type: client_1.NotificationType.TRIP_CREATED, title: `${created.tripNo} draft created`, message: `A new trip from ${created.source} to ${created.destination} is ready for dispatch review.` });
+        return created;
+    });
+    res.status(201).json(result);
 }));
 app.post('/api/trips/:id/dispatch', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => {
     const trip = await db.trip.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId } });
@@ -649,27 +689,29 @@ app.post('/api/trips/:id/dispatch', allow(client_1.Role.DISPATCHER, client_1.Rol
         const driver = await tx.driver.updateMany({ where: { id: trip.driverId, organizationId: req.user.organizationId, status: client_1.DriverStatus.AVAILABLE, licenseExpiry: { gt: new Date() } }, data: { status: client_1.DriverStatus.ON_TRIP } });
         if (vehicle.count !== 1 || driver.count !== 1)
             throw new assignmentEligibility_1.AssignmentEligibilityError([{ code: vehicle.count !== 1 ? 'VEHICLE_ON_TRIP' : 'DRIVER_ON_TRIP', field: vehicle.count !== 1 ? 'vehicleId' : 'driverId', message: 'Assignment availability changed while dispatching. Review the latest vehicle and driver status, then try again.' }]);
-        return tx.trip.update({ where: { id: trip.id }, data: { status: client_1.TripStatus.DISPATCHED, dispatchedAt: new Date(), ...estimatedProfitabilityData(estimate) }, include: { vehicle: true, driver: true } });
+        const dispatched = await tx.trip.update({ where: { id: trip.id }, data: { status: client_1.TripStatus.DISPATCHED, dispatchedAt: new Date(), ...estimatedProfitabilityData(estimate) }, include: { vehicle: true, driver: true } });
+        await notifyTripUsers(tx, { organizationId: req.user.organizationId, tripId: trip.id, assignedDriverId: trip.driverId, type: client_1.NotificationType.TRIP_DISPATCHED, title: `${trip.tripNo} dispatched`, message: `${dispatched.driver.name} was assigned ${dispatched.vehicle.registrationNo} for ${trip.source} to ${trip.destination}.` });
+        return dispatched;
     }, { isolationLevel: client_1.Prisma.TransactionIsolationLevel.Serializable });
     res.json(result);
 }));
 app.post('/api/trips/:id/complete', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => {
     const { finalOdometerKm, fuelConsumedL, driverHours } = parse(zod_1.z.object({ finalOdometerKm: zod_1.z.coerce.number().positive(), fuelConsumedL: zod_1.z.coerce.number().positive(), driverHours: zod_1.z.coerce.number().positive().optional() }), req.body);
-    const trip = await db.trip.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId }, include: { driver: true } });
-    if (!trip || trip.status !== client_1.TripStatus.DISPATCHED)
-        throw Object.assign(new Error('Only dispatched trips can be completed'), { status: 409 });
+    const trip = await db.trip.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId }, include: { driver: true, vehicle: true } });
+    if (!trip || (trip.status !== client_1.TripStatus.DISPATCHED && trip.status !== client_1.TripStatus.IN_PROGRESS))
+        throw Object.assign(new Error('Only dispatched or in-progress trips can be completed'), { status: 409 });
     if (trip.driver.payType === client_1.DriverPayType.HOURLY && trip.driver.payRate > 0 && !driverHours)
         return res.status(400).json({ message: 'Driver hours are required for hourly payout' });
     const payout = trip.driver.payRate > 0 ? (trip.driver.payType === client_1.DriverPayType.HOURLY ? trip.driver.payRate * (driverHours || 0) : trip.driver.payRate) : 0;
     const result = await db.$transaction(async (tx) => { await tx.vehicle.update({ where: { id: trip.vehicleId }, data: { status: client_1.VehicleStatus.AVAILABLE, odometerKm: finalOdometerKm } }); await tx.driver.update({ where: { id: trip.driverId }, data: { status: client_1.DriverStatus.AVAILABLE } }); const completed = await tx.trip.update({ where: { id: trip.id }, data: { status: client_1.TripStatus.COMPLETED, completedAt: new Date(), finalOdometerKm, fuelConsumedL }, include: { vehicle: true, driver: true } }); if (payout > 0)
-        await tx.expense.create({ data: { organizationId: req.user.organizationId, tripId: trip.id, vehicleId: trip.vehicleId, driverId: trip.driverId, type: client_1.ExpenseType.DRIVER_PAYMENT, description: `Driver payout for ${trip.tripNo} · ${trip.driver.payType === client_1.DriverPayType.HOURLY ? `${driverHours} hours @ ${moneyForLog(trip.driver.payRate)}/hr` : `per trip @ ${moneyForLog(trip.driver.payRate)}`}`, amount: payout, date: new Date() } }); await syncRealizedTripProfitability(tx, req.user.organizationId, trip.id); return completed; });
+        await tx.expense.create({ data: { organizationId: req.user.organizationId, tripId: trip.id, vehicleId: trip.vehicleId, driverId: trip.driverId, type: client_1.ExpenseType.DRIVER_PAYMENT, description: `Driver payout for ${trip.tripNo} · ${trip.driver.payType === client_1.DriverPayType.HOURLY ? `${driverHours} hours @ ${moneyForLog(trip.driver.payRate)}/hr` : `per trip @ ${moneyForLog(trip.driver.payRate)}`}`, amount: payout, date: new Date() } }); await syncRealizedTripProfitability(tx, req.user.organizationId, trip.id); await notifyTripUsers(tx, { organizationId: req.user.organizationId, tripId: trip.id, assignedDriverId: trip.driverId, type: client_1.NotificationType.TRIP_COMPLETED, title: `${trip.tripNo} completed`, message: `${trip.driver.name} completed the trip to ${trip.destination} in ${trip.vehicle.registrationNo}.` }); return completed; });
     res.json(result);
 }));
 app.post('/api/trips/:id/cancel', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => { const trip = await db.trip.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId } }); if (!trip || (trip.status !== client_1.TripStatus.DRAFT && trip.status !== client_1.TripStatus.DISPATCHED))
     throw Object.assign(new Error('Trip cannot be cancelled'), { status: 409 }); const wasLive = trip.status === client_1.TripStatus.DISPATCHED; const result = await db.$transaction(async (tx) => { if (wasLive) {
     await tx.vehicle.update({ where: { id: trip.vehicleId }, data: { status: client_1.VehicleStatus.AVAILABLE } });
     await tx.driver.update({ where: { id: trip.driverId }, data: { status: client_1.DriverStatus.AVAILABLE } });
-} return tx.trip.update({ where: { id: trip.id }, data: { status: client_1.TripStatus.CANCELLED }, include: { vehicle: true, driver: true } }); }); res.json(result); }));
+} const cancelled = await tx.trip.update({ where: { id: trip.id }, data: { status: client_1.TripStatus.CANCELLED }, include: { vehicle: true, driver: true } }); await notifyTripUsers(tx, { organizationId: req.user.organizationId, tripId: trip.id, assignedDriverId: wasLive ? trip.driverId : null, type: client_1.NotificationType.TRIP_CANCELLED, title: `${trip.tripNo} cancelled`, message: `The ${trip.source} to ${trip.destination} trip was cancelled.` }); return cancelled; }); res.json(result); }));
 app.get('/api/profitability', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER, client_1.Role.FINANCIAL_ANALYST), asyncRoute(async (req, res) => {
     const organizationId = req.user.organizationId;
     const current = await db.trip.findMany({ where: { organizationId, status: { not: client_1.TripStatus.CANCELLED } }, select: { id: true, vehicleId: true, plannedDistanceKm: true, revenue: true, estimatedTollsInr: true, profitabilityEstimatedAt: true, status: true } });
