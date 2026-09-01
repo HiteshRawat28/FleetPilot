@@ -226,11 +226,22 @@ When web operations complete the trip, any open `REPORTED` issue for that vehicl
 Do not invent client-only success states or undocumented endpoints for:
 
 - Driver-side trip completion. Web operations currently complete trips through privileged `POST /trips/:tripId/complete`.
-- Refresh tokens or forgot/reset password.
+- Refresh tokens. Password recovery is available through the public `POST /auth/forgot-password` and `POST /auth/reset-password` endpoints described below.
 - Push-notification device registration.
 - Mobile-specific company/employee dashboards beyond existing role-protected APIs.
 
 The mobile app must hide/disable these actions and record the precise backend dependency.
+
+## Password recovery
+
+Password recovery is public and role-neutral:
+
+- `POST /auth/forgot-password` with `{ "email": "driver@example.com" }` always returns `202` with the same message, whether or not the account exists.
+- The emailed link contains a single-use token that expires after 30 minutes.
+- `POST /auth/reset-password` with `{ "token": "...", "password": "NewPassword123" }` changes the password and revokes existing sessions.
+- Invalid, expired, or consumed tokens return `400` with code `RESET_TOKEN_INVALID`.
+
+Never display whether an email is registered, store reset tokens, or consume a link automatically in the background.
 
 ## Synchronization rules
 

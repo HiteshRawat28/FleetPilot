@@ -4,6 +4,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 require("dotenv/config");
+const node_crypto_1 = require("node:crypto");
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
@@ -22,6 +23,10 @@ const objectStorage_1 = require("./services/objectStorage");
 const ocr_1 = require("./services/ocr");
 const security_1 = require("./chat/security");
 const session_1 = require("./auth/session");
+const passwordPolicy_1 = require("./auth/passwordPolicy");
+const passwordReset_1 = require("./auth/passwordReset");
+const rateLimit_1 = require("./auth/rateLimit");
+const email_1 = require("./services/email");
 const locationTracking_1 = require("./services/locationTracking");
 const notificationAudience_1 = require("./services/notificationAudience");
 const db = new client_1.PrismaClient();
@@ -33,6 +38,9 @@ const tripProfitabilityConfig = (0, tripProfitability_1.loadTripProfitabilityCon
 const googleClient = new google_auth_library_1.OAuth2Client(GOOGLE_CLIENT_ID);
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173').split(',').map(origin => origin.trim());
 const cookieOptions = (0, session_1.sessionCookieOptions)(process.env.NODE_ENV === 'production');
+const { maxAge: _maxAge, ...clearCookieOptions } = cookieOptions;
+const passwordResetService = new passwordReset_1.PasswordResetService(db, process.env.PASSWORD_RESET_URL || `${allowedOrigins[0]}/reset-password`);
+(0, email_1.assertEmailConfiguration)();
 const tripLocationStreams = new Map();
 const publishTripLocation = (tripId, payload) => {
     const message = `data: ${JSON.stringify(payload)}\n\n`;
@@ -62,7 +70,7 @@ const authenticate = asyncRoute(async (req, res, next) => {
     try {
         const claims = jsonwebtoken_1.default.verify(token, SECRET);
         const account = await db.user.findUnique({ where: { id: claims.id }, include: { organization: true, driver: true } });
-        if (!account || !account.isActive)
+        if (!account || !account.isActive || !(0, session_1.sessionVersionMatches)(claims.sessionVersion, account.sessionVersion))
             return res.status(401).json({ message: 'This session no longer has access' });
         await db.user.update({ where: { id: account.id }, data: { lastActiveAt: new Date() } });
         req.user = publicUser(account);
@@ -88,7 +96,7 @@ async function notifyTripUsers(client, input) {
         return;
     await client.notification.createMany({ data: recipients.map(user => ({ organizationId: input.organizationId, userId: user.id, type: input.type, title: input.title, message: input.message, tripId: input.tripId })) });
 }
-const sendSession = (res, user, status = 200) => { res.cookie(session_1.SESSION_COOKIE, jsonwebtoken_1.default.sign(user, SECRET, { expiresIn: '8h' }), cookieOptions); res.setHeader('Cache-Control', 'no-store'); return res.status(status).json({ user }); };
+const sendSession = (res, account, status = 200) => { const user = publicUser(account); res.cookie(session_1.SESSION_COOKIE, jsonwebtoken_1.default.sign({ ...user, sessionVersion: account.sessionVersion }, SECRET, { expiresIn: '8h' }), cookieOptions); res.setHeader('Cache-Control', 'no-store'); return res.status(status).json({ user }); };
 const modulesByRole = {
     OWNER: ['Overview', 'Fleet registry', 'Drivers', 'Driver access', 'Trip dispatch', 'Profitability', 'Maintenance', 'Fuel & expenses', 'Reports', 'Company settings', 'User access'],
     ADMIN: ['Overview', 'Fleet registry', 'Drivers', 'Driver access', 'Trip dispatch', 'Profitability', 'Maintenance', 'Fuel & expenses', 'Reports', 'Company settings', 'User access'],
@@ -123,6 +131,11 @@ async function driverDashboardResponse(driverId, organizationId) {
     ]);
     return { profile, trips, expenses: await Promise.all(expenses.map(expenseResponse)) };
 }
+const requestIp = (req) => req.ip || req.socket.remoteAddress || 'unknown';
+const forgotIpLimit = (0, rateLimit_1.createRateLimit)({ windowMs: 60 * 60_000, max: 20, key: requestIp });
+const forgotEmailLimit = (0, rateLimit_1.createRateLimit)({ windowMs: 60 * 60_000, max: 5, key: req => (0, rateLimit_1.privacyHash)(String(req.body?.email || '')) });
+const resetIpLimit = (0, rateLimit_1.createRateLimit)({ windowMs: 15 * 60_000, max: 10, key: requestIp });
+const authAudit = (event, requestId, result, userId) => console.info(JSON.stringify({ event, requestId, result, ...(userId ? { userId } : {}), occurredAt: new Date().toISOString() }));
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'TransitOps API' }));
 app.post('/api/auth/login', asyncRoute(async (req, res) => {
     const { email, password } = parse(zod_1.z.object({ email: zod_1.z.email(), password: zod_1.z.string().min(8) }), req.body);
@@ -132,7 +145,7 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
     if (!user.isActive)
         return res.status(403).json({ message: 'Your account has been suspended. Contact your company administrator.' });
     await db.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date(), lastActiveAt: new Date() } });
-    sendSession(res, publicUser(user));
+    sendSession(res, user);
 }));
 app.post('/api/driver/auth/login', asyncRoute(async (req, res) => {
     const { email, password } = parse(zod_1.z.object({ email: zod_1.z.email(), password: zod_1.z.string().min(8) }), req.body);
@@ -143,13 +156,13 @@ app.post('/api/driver/auth/login', asyncRoute(async (req, res) => {
         return res.status(403).json({ message: 'Your account has been suspended. Contact your company administrator.' });
     if (user.role !== client_1.Role.DRIVER || !user.driver)
         return res.status(403).json({ message: 'A linked Driver account is required for mobile driver access' });
-    const session = publicUser(user), token = jsonwebtoken_1.default.sign(session, SECRET, { expiresIn: '24h' });
+    const session = publicUser(user), token = jsonwebtoken_1.default.sign({ ...session, sessionVersion: user.sessionVersion }, SECRET, { expiresIn: '24h' });
     await db.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date(), lastActiveAt: new Date() } });
     res.setHeader('Cache-Control', 'no-store');
     res.json({ token, user: session });
 }));
 app.post('/api/auth/register', asyncRoute(async (req, res) => {
-    const { name, email, password, companyName } = parse(zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: zod_1.z.string().min(10).regex(/[A-Z]/, 'Password needs an uppercase letter').regex(/[0-9]/, 'Password needs a number'), companyName: zod_1.z.string().trim().min(2).max(100) }), req.body);
+    const { name, email, password, companyName } = parse(zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: passwordPolicy_1.passwordSchema, companyName: zod_1.z.string().trim().min(2).max(100) }), req.body);
     const normalizedEmail = email.toLowerCase();
     if (await db.user.findUnique({ where: { email: normalizedEmail } }))
         return res.status(409).json({ message: 'An account already exists for this email' });
@@ -162,7 +175,7 @@ app.post('/api/auth/register', asyncRoute(async (req, res) => {
         const organization = await tx.organization.create({ data: { name: companyName, slug, operationsEmail: normalizedEmail } });
         return tx.user.create({ data: { name, email: normalizedEmail, passwordHash: await bcryptjs_1.default.hash(password, 12), role: client_1.Role.OWNER, organizationId: organization.id, lastLoginAt: new Date(), lastActiveAt: new Date() }, include: { organization: true, driver: true } });
     });
-    sendSession(res, publicUser(user), 201);
+    sendSession(res, user, 201);
 }));
 app.post('/api/auth/google', asyncRoute(async (req, res) => {
     if (!GOOGLE_CLIENT_ID)
@@ -191,22 +204,47 @@ app.post('/api/auth/google', asyncRoute(async (req, res) => {
             return res.status(409).json({ message: 'This email is linked to another Google identity' });
         user = await db.user.update({ where: { id: user.id }, data: { googleSub: payload.sub, lastLoginAt: new Date(), lastActiveAt: new Date() }, include: { organization: true, driver: true } });
     }
-    sendSession(res, publicUser(user));
+    sendSession(res, user);
 }));
 app.post('/api/driver/auth/register', (_req, res) => res.status(410).json({ message: 'Driver accounts are created by the company in User Access. Use the credentials provided by your fleet manager.' }));
-app.post('/api/auth/logout', (_req, res) => { const { maxAge: _maxAge, ...clearCookieOptions } = cookieOptions; res.clearCookie(session_1.SESSION_COOKIE, clearCookieOptions); res.status(204).end(); });
+app.post('/api/auth/forgot-password', forgotIpLimit, forgotEmailLimit, asyncRoute(async (req, res) => {
+    const { email } = parse(zod_1.z.object({ email: zod_1.z.email() }), req.body);
+    const requestId = (0, node_crypto_1.randomUUID)();
+    res.setHeader('X-Request-Id', requestId);
+    try {
+        const userId = await passwordResetService.request(email);
+        authAudit('password_reset_requested', requestId, userId ? 'issued' : 'ignored', userId || undefined);
+    }
+    catch (error) {
+        authAudit('password_reset_requested', requestId, 'delivery_failed');
+        console.error('Password-reset delivery failed:', error instanceof Error ? error.message : 'Unknown error');
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(202).json({ message: 'If an account exists for that email, password-reset instructions have been sent.' });
+}));
+app.post('/api/auth/reset-password', resetIpLimit, asyncRoute(async (req, res) => {
+    const { token, password } = parse(zod_1.z.object({ token: zod_1.z.string().min(32).max(200), password: passwordPolicy_1.passwordSchema }), req.body);
+    const requestId = (0, node_crypto_1.randomUUID)();
+    res.setHeader('X-Request-Id', requestId);
+    const userId = await passwordResetService.reset(token, password);
+    authAudit('password_reset_completed', requestId, 'completed', userId);
+    res.clearCookie(session_1.SESSION_COOKIE, clearCookieOptions);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ message: 'Your password has been reset. Please sign in.' });
+}));
+app.post('/api/auth/logout', (_req, res) => { res.clearCookie(session_1.SESSION_COOKIE, clearCookieOptions); res.status(204).end(); });
 app.get('/api/auth/me', authenticate, (req, res) => { res.setHeader('Cache-Control', 'no-store'); res.json({ user: req.user }); });
 app.use('/api', authenticate);
 app.post('/api/auth/change-password', asyncRoute(async (req, res) => {
-    const { currentPassword, newPassword } = parse(zod_1.z.object({ currentPassword: zod_1.z.string().min(8), newPassword: zod_1.z.string().min(10).regex(/[A-Z]/, 'Password needs an uppercase letter').regex(/[0-9]/, 'Password needs a number') }), req.body);
+    const { currentPassword, newPassword } = parse(zod_1.z.object({ currentPassword: zod_1.z.string().min(8), newPassword: passwordPolicy_1.passwordSchema }), req.body);
     const account = await db.user.findUnique({ where: { id: req.user.id } });
     if (!account?.passwordHash || !(await bcryptjs_1.default.compare(currentPassword, account.passwordHash)))
         return res.status(401).json({ message: 'Current password is incorrect' });
-    const user = await db.user.update({ where: { id: account.id }, data: { passwordHash: await bcryptjs_1.default.hash(newPassword, 12), mustChangePassword: false }, include: { organization: true, driver: true } });
+    const user = await db.user.update({ where: { id: account.id }, data: { passwordHash: await bcryptjs_1.default.hash(newPassword, 12), mustChangePassword: false, sessionVersion: { increment: 1 } }, include: { organization: true, driver: true } });
     const session = publicUser(user);
-    res.cookie(session_1.SESSION_COOKIE, jsonwebtoken_1.default.sign(session, SECRET, { expiresIn: '8h' }), cookieOptions);
+    res.cookie(session_1.SESSION_COOKIE, jsonwebtoken_1.default.sign({ ...session, sessionVersion: user.sessionVersion }, SECRET, { expiresIn: '8h' }), cookieOptions);
     res.setHeader('Cache-Control', 'no-store');
-    res.json({ user: session, ...(session.role === client_1.Role.DRIVER ? { token: jsonwebtoken_1.default.sign(session, SECRET, { expiresIn: '24h' }) } : {}) });
+    res.json({ user: session, ...(session.role === client_1.Role.DRIVER ? { token: jsonwebtoken_1.default.sign({ ...session, sessionVersion: user.sessionVersion }, SECRET, { expiresIn: '24h' }) } : {}) });
 }));
 app.use('/api/chat', (0, chat_1.createChatRouter)(db));
 app.get('/api/profile', asyncRoute(async (req, res) => res.json(await profileResponse(req.user.id))));
@@ -349,8 +387,8 @@ app.get('/api/users', allow(client_1.Role.OWNER, client_1.Role.ADMIN), asyncRout
     const users = await db.user.findMany({ where: { organizationId: req.user.organizationId }, select: { id: true, name: true, email: true, role: true, isActive: true, lastLoginAt: true, lastActiveAt: true, createdAt: true, googleSub: true, driver: { select: { id: true, licenseNo: true, licenseCategory: true, licenseExpiry: true, onboardingStatus: true, reviewNote: true, status: true, payType: true, payRate: true, createdAt: true, documents: { select: { id: true, type: true, originalName: true, mimeType: true, size: true, createdAt: true }, orderBy: { createdAt: 'desc' } } } } }, orderBy: { createdAt: 'asc' } });
     res.json(users);
 }));
-const teamAccessSchema = zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: zod_1.z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/), role: zod_1.z.enum(client_1.Role).refine(role => role !== client_1.Role.OWNER && role !== client_1.Role.DRIVER, 'Driver accounts must be created from Driver Access') });
-const driverAccessSchema = zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: zod_1.z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/), contact: zod_1.z.string().trim().min(7).max(30), payType: zod_1.z.enum(client_1.DriverPayType).default(client_1.DriverPayType.PER_TRIP), payRate: zod_1.z.coerce.number().nonnegative().default(0) });
+const teamAccessSchema = zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: passwordPolicy_1.passwordSchema, role: zod_1.z.enum(client_1.Role).refine(role => role !== client_1.Role.OWNER && role !== client_1.Role.DRIVER, 'Driver accounts must be created from Driver Access') });
+const driverAccessSchema = zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: passwordPolicy_1.passwordSchema, contact: zod_1.z.string().trim().min(7).max(30), payType: zod_1.z.enum(client_1.DriverPayType).default(client_1.DriverPayType.PER_TRIP), payRate: zod_1.z.coerce.number().nonnegative().default(0) });
 app.post('/api/users', allow(client_1.Role.OWNER, client_1.Role.ADMIN), asyncRoute(async (req, res) => {
     const { name, email, password, role } = parse(teamAccessSchema, req.body);
     if (req.user.role === client_1.Role.ADMIN && role === client_1.Role.ADMIN)
@@ -371,9 +409,9 @@ app.post('/api/driver-access', allow(client_1.Role.OWNER, client_1.Role.ADMIN, c
 }));
 app.patch('/api/users/:id', allow(client_1.Role.OWNER, client_1.Role.ADMIN), asyncRoute(async (req, res) => { const target = await db.user.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId } }); if (!target)
     throw Object.assign(new Error('Team member not found'), { status: 404 }); if (target.role === client_1.Role.OWNER)
-    return res.status(403).json({ message: 'Owner access cannot be changed' }); const data = parse(zod_1.z.object({ role: zod_1.z.enum(client_1.Role).refine(r => r !== client_1.Role.OWNER).optional(), isActive: zod_1.z.boolean().optional(), password: zod_1.z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/).optional() }), req.body); if (req.user.role === client_1.Role.ADMIN && (target.role === client_1.Role.ADMIN || data.role === client_1.Role.ADMIN))
+    return res.status(403).json({ message: 'Owner access cannot be changed' }); const data = parse(zod_1.z.object({ role: zod_1.z.enum(client_1.Role).refine(r => r !== client_1.Role.OWNER).optional(), isActive: zod_1.z.boolean().optional(), password: passwordPolicy_1.passwordSchema.optional() }), req.body); if (req.user.role === client_1.Role.ADMIN && (target.role === client_1.Role.ADMIN || data.role === client_1.Role.ADMIN))
     return res.status(403).json({ message: 'Only the Owner can manage Admin access' }); if (data.role && data.role !== target.role && (data.role === client_1.Role.DRIVER || target.role === client_1.Role.DRIVER))
-    return res.status(409).json({ message: 'Driver access must be created as a new linked Driver account' }); res.json(await db.user.update({ where: { id: target.id }, data: { role: data.role, isActive: data.isActive, ...(data.password ? { passwordHash: await bcryptjs_1.default.hash(data.password, 12), mustChangePassword: target.role === client_1.Role.DRIVER } : {}) }, select: { id: true, name: true, email: true, role: true, isActive: true, lastLoginAt: true, lastActiveAt: true, createdAt: true, googleSub: true } })); }));
+    return res.status(409).json({ message: 'Driver access must be created as a new linked Driver account' }); res.json(await db.user.update({ where: { id: target.id }, data: { role: data.role, isActive: data.isActive, ...(data.password ? { passwordHash: await bcryptjs_1.default.hash(data.password, 12), mustChangePassword: target.role === client_1.Role.DRIVER, sessionVersion: { increment: 1 } } : {}) }, select: { id: true, name: true, email: true, role: true, isActive: true, lastLoginAt: true, lastActiveAt: true, createdAt: true, googleSub: true } })); }));
 app.get('/api/dashboard', asyncRoute(async (req, res) => {
     const showRecentTrips = (0, security_1.disclosurePolicyForRole)(req.user.role).recentTripDetails;
     const [vehicles, drivers, trips, recentTrips] = await Promise.all([
@@ -748,7 +786,8 @@ async function analytics(organizationId) {
 const allowFinancialAnalytics = (req, res, next) => (0, security_1.disclosurePolicyForRole)(req.user.role).financialAnalytics ? next() : res.status(403).json({ message: 'You do not have permission to view financial analytics' });
 app.get('/api/analytics', allowFinancialAnalytics, asyncRoute(async (req, res) => res.json(await analytics(req.user.organizationId))));
 app.get('/api/analytics/export.csv', allowFinancialAnalytics, asyncRoute(async (req, res) => { const a = await analytics(req.user.organizationId); const csv = ['Vehicle,Registration,Status,Completed Trips,Distance Km,Revenue,Fuel Cost,Maintenance Cost,Other Expenses,Operational Cost,Profit,Margin %,Cost Per Km,ROI %', ...a.byVehicle.map(x => `"${x.name}","${x.registrationNo}",${x.status},${x.completedTrips},${x.distanceKm.toFixed(2)},${x.revenue.toFixed(2)},${x.fuelCost.toFixed(2)},${x.maintenanceCost.toFixed(2)},${x.expenseCost.toFixed(2)},${x.operationalCost.toFixed(2)},${x.profit.toFixed(2)},${x.marginPercent?.toFixed(2) ?? ''},${x.costPerKm?.toFixed(2) ?? ''},${x.roi?.toFixed(2) ?? ''}`)].join('\n'); res.type('text/csv').attachment('fleetpilot-analytics.csv').send(csv); }));
-app.use((err, req, res, _next) => { console.error(err); if (err instanceof multer_1.default.MulterError) {
+app.use((err, req, res, _next) => { console.error(err); if (err instanceof passwordReset_1.InvalidResetTokenError)
+    return res.status(err.status).json({ code: err.code, message: err.message }); if (err instanceof multer_1.default.MulterError) {
     const isDriverOnboarding = req.path.includes('/onboarding');
     return res.status(400).json({ message: err.code === 'LIMIT_FILE_SIZE' ? `Image must be ${isDriverOnboarding ? '8' : '20'} MB or smaller` : 'The image could not be uploaded' });
 } if (err instanceof assignmentEligibility_1.AssignmentEligibilityError)

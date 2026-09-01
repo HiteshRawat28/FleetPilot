@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { randomUUID } from 'node:crypto';
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
@@ -16,7 +17,11 @@ import { createChatRouter } from './chat/chat';
 import { objectStorageConfigured, signedObjectUrl, uploadPrivateObject } from './services/objectStorage';
 import { extractDrivingLicense, extractReceipt } from './services/ocr';
 import { disclosurePolicyForRole } from './chat/security';
-import { SESSION_COOKIE, sessionCookieOptions, sessionToken } from './auth/session';
+import { SESSION_COOKIE, sessionCookieOptions, sessionToken, sessionVersionMatches } from './auth/session';
+import { passwordSchema } from './auth/passwordPolicy';
+import { InvalidResetTokenError, PasswordResetService } from './auth/passwordReset';
+import { createRateLimit, privacyHash } from './auth/rateLimit';
+import { assertEmailConfiguration } from './services/email';
 import { locationTimestampBelongsToDispatch,trackingStatus } from './services/locationTracking';
 import { receivesTripNotification } from './services/notificationAudience';
 
@@ -29,6 +34,9 @@ const tripProfitabilityConfig = loadTripProfitabilityConfig();
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173').split(',').map(origin => origin.trim());
 const cookieOptions=sessionCookieOptions(process.env.NODE_ENV==='production');
+const {maxAge:_maxAge,...clearCookieOptions}=cookieOptions;
+const passwordResetService = new PasswordResetService(db,process.env.PASSWORD_RESET_URL||`${allowedOrigins[0]}/reset-password`);
+assertEmailConfiguration();
 const tripLocationStreams=new Map<string,Set<Response>>();
 const publishTripLocation=(tripId:string,payload:unknown)=>{
   const message=`data: ${JSON.stringify(payload)}\n\n`;
@@ -50,12 +58,14 @@ const driverDocumentUpload=multer({storage:multer.memoryStorage(),limits:{fileSi
 const driverReceiptUpload=multer({storage:multer.memoryStorage(),limits:{fileSize:20*1024*1024,files:1},fileFilter:(_req,file,callback)=>callback(null,Boolean(imageMimeType(file)))});
 
 type Session = { id:string; name:string; email:string; phone?:string|null; jobTitle?:string|null; role:Role; organizationId:string; organizationName:string; driverId?:string|null; onboardingStatus?:DriverOnboardingStatus|null; mustChangePassword:boolean };
+type SessionClaims = Session & { sessionVersion?:number };
+type SessionAccount = { id:string; name:string; email:string; phone?:string|null; jobTitle?:string|null; role:Role; organizationId:string; mustChangePassword:boolean; sessionVersion:number; organization:{name:string}; driver?:{id:string;onboardingStatus:DriverOnboardingStatus}|null };
 declare global { namespace Express { interface Request { user?: Session } } }
 const asyncRoute = (fn:(req:Request,res:Response,next:NextFunction)=>Promise<unknown>) => (req:Request,res:Response,next:NextFunction) => { Promise.resolve(fn(req,res,next)).catch(next); };
 const authenticate = asyncRoute(async (req,res,next) => {
   const token = sessionToken({authorization:req.headers.authorization,cookie:req.headers.cookie});
   if (!token) return res.status(401).json({message:'Authentication required'});
-  try { const claims=jwt.verify(token,SECRET) as Session;const account=await db.user.findUnique({where:{id:claims.id},include:{organization:true,driver:true}});if(!account||!account.isActive)return res.status(401).json({message:'This session no longer has access'});await db.user.update({where:{id:account.id},data:{lastActiveAt:new Date()}});req.user=publicUser(account);next(); }
+  try { const claims=jwt.verify(token,SECRET) as SessionClaims;const account=await db.user.findUnique({where:{id:claims.id},include:{organization:true,driver:true}});if(!account||!account.isActive||!sessionVersionMatches(claims.sessionVersion,account.sessionVersion))return res.status(401).json({message:'This session no longer has access'});await db.user.update({where:{id:account.id},data:{lastActiveAt:new Date()}});req.user=publicUser(account);next(); }
   catch { res.status(401).json({message:'Session expired. Please sign in again.'}); }
 });
 const elevated = [Role.OWNER,Role.ADMIN];
@@ -73,7 +83,7 @@ async function notifyTripUsers(client:NotificationDb,input:{organizationId:strin
   if(!recipients.length)return;
   await client.notification.createMany({data:recipients.map(user=>({organizationId:input.organizationId,userId:user.id,type:input.type,title:input.title,message:input.message,tripId:input.tripId}))});
 }
-const sendSession = (res:Response,user:Session,status=200) => {res.cookie(SESSION_COOKIE,jwt.sign(user,SECRET,{expiresIn:'8h'}),cookieOptions);res.setHeader('Cache-Control','no-store');return res.status(status).json({user})};
+const sendSession = (res:Response,account:SessionAccount,status=200) => {const user=publicUser(account);res.cookie(SESSION_COOKIE,jwt.sign({...user,sessionVersion:account.sessionVersion},SECRET,{expiresIn:'8h'}),cookieOptions);res.setHeader('Cache-Control','no-store');return res.status(status).json({user})};
 const modulesByRole:Record<Role,string[]>={
   OWNER:['Overview','Fleet registry','Drivers','Driver access','Trip dispatch','Profitability','Maintenance','Fuel & expenses','Reports','Company settings','User access'],
   ADMIN:['Overview','Fleet registry','Drivers','Driver access','Trip dispatch','Profitability','Maintenance','Fuel & expenses','Reports','Company settings','User access'],
@@ -106,6 +116,11 @@ async function driverDashboardResponse(driverId:string,organizationId:string){
   ]);
   return {profile,trips,expenses:await Promise.all(expenses.map(expenseResponse))};
 }
+const requestIp=(req:Request)=>req.ip||req.socket.remoteAddress||'unknown';
+const forgotIpLimit=createRateLimit({windowMs:60*60_000,max:20,key:requestIp});
+const forgotEmailLimit=createRateLimit({windowMs:60*60_000,max:5,key:req=>privacyHash(String(req.body?.email||''))});
+const resetIpLimit=createRateLimit({windowMs:15*60_000,max:10,key:requestIp});
+const authAudit=(event:string,requestId:string,result:string,userId?:string)=>console.info(JSON.stringify({event,requestId,result,...(userId?{userId}:{}),occurredAt:new Date().toISOString()}));
 
 app.get('/api/health', (_req,res)=>res.json({status:'ok',service:'TransitOps API'}));
 app.post('/api/auth/login', asyncRoute(async(req,res)=>{
@@ -114,7 +129,7 @@ app.post('/api/auth/login', asyncRoute(async(req,res)=>{
   if(!user || !user.passwordHash || !(await bcrypt.compare(password,user.passwordHash))) return res.status(401).json({message:'Email or password is incorrect'});
   if(!user.isActive) return res.status(403).json({message:'Your account has been suspended. Contact your company administrator.'});
   await db.user.update({where:{id:user.id},data:{lastLoginAt:new Date(),lastActiveAt:new Date()}});
-  sendSession(res,publicUser(user));
+  sendSession(res,user);
 }));
 app.post('/api/driver/auth/login',asyncRoute(async(req,res)=>{
   const {email,password}=parse(z.object({email:z.email(),password:z.string().min(8)}),req.body);
@@ -122,12 +137,12 @@ app.post('/api/driver/auth/login',asyncRoute(async(req,res)=>{
   if(!user||!user.passwordHash||!(await bcrypt.compare(password,user.passwordHash)))return res.status(401).json({message:'Email or password is incorrect'});
   if(!user.isActive)return res.status(403).json({message:'Your account has been suspended. Contact your company administrator.'});
   if(user.role!==Role.DRIVER||!user.driver)return res.status(403).json({message:'A linked Driver account is required for mobile driver access'});
-  const session=publicUser(user),token=jwt.sign(session,SECRET,{expiresIn:'24h'});
+  const session=publicUser(user),token=jwt.sign({...session,sessionVersion:user.sessionVersion},SECRET,{expiresIn:'24h'});
   await db.user.update({where:{id:user.id},data:{lastLoginAt:new Date(),lastActiveAt:new Date()}});
   res.setHeader('Cache-Control','no-store');res.json({token,user:session});
 }));
 app.post('/api/auth/register', asyncRoute(async(req,res)=>{
-  const {name,email,password,companyName}=parse(z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:z.string().min(10).regex(/[A-Z]/,'Password needs an uppercase letter').regex(/[0-9]/,'Password needs a number'),companyName:z.string().trim().min(2).max(100)}),req.body);
+  const {name,email,password,companyName}=parse(z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:passwordSchema,companyName:z.string().trim().min(2).max(100)}),req.body);
   const normalizedEmail=email.toLowerCase();
   if(await db.user.findUnique({where:{email:normalizedEmail}})) return res.status(409).json({message:'An account already exists for this email'});
   const base=slugify(companyName)||'company'; let slug=base; let suffix=1;
@@ -136,7 +151,7 @@ app.post('/api/auth/register', asyncRoute(async(req,res)=>{
     const organization=await tx.organization.create({data:{name:companyName,slug,operationsEmail:normalizedEmail}});
     return tx.user.create({data:{name,email:normalizedEmail,passwordHash:await bcrypt.hash(password,12),role:Role.OWNER,organizationId:organization.id,lastLoginAt:new Date(),lastActiveAt:new Date()},include:{organization:true,driver:true}});
   });
-  sendSession(res,publicUser(user),201);
+  sendSession(res,user,201);
 }));
 app.post('/api/auth/google', asyncRoute(async(req,res)=>{
   if(!GOOGLE_CLIENT_ID) return res.status(503).json({message:'Google sign-in is not configured yet'});
@@ -153,20 +168,37 @@ app.post('/api/auth/google', asyncRoute(async(req,res)=>{
     if(user.googleSub&&user.googleSub!==payload.sub)return res.status(409).json({message:'This email is linked to another Google identity'});
     user=await db.user.update({where:{id:user.id},data:{googleSub:payload.sub,lastLoginAt:new Date(),lastActiveAt:new Date()},include:{organization:true,driver:true}});
   }
-  sendSession(res,publicUser(user));
+  sendSession(res,user);
 }));
 app.post('/api/driver/auth/register',(_req,res)=>res.status(410).json({message:'Driver accounts are created by the company in User Access. Use the credentials provided by your fleet manager.'}));
-app.post('/api/auth/logout',(_req,res)=>{const {maxAge:_maxAge,...clearCookieOptions}=cookieOptions;res.clearCookie(SESSION_COOKIE,clearCookieOptions);res.status(204).end()});
+app.post('/api/auth/forgot-password',forgotIpLimit,forgotEmailLimit,asyncRoute(async(req,res)=>{
+  const {email}=parse(z.object({email:z.email()}),req.body);
+  const requestId=randomUUID();res.setHeader('X-Request-Id',requestId);
+  try { const userId=await passwordResetService.request(email);authAudit('password_reset_requested',requestId,userId?'issued':'ignored',userId||undefined); }
+  catch(error) { authAudit('password_reset_requested',requestId,'delivery_failed');console.error('Password-reset delivery failed:',error instanceof Error?error.message:'Unknown error'); }
+  res.setHeader('Cache-Control','no-store');
+  res.status(202).json({message:'If an account exists for that email, password-reset instructions have been sent.'});
+}));
+app.post('/api/auth/reset-password',resetIpLimit,asyncRoute(async(req,res)=>{
+  const {token,password}=parse(z.object({token:z.string().min(32).max(200),password:passwordSchema}),req.body);
+  const requestId=randomUUID();res.setHeader('X-Request-Id',requestId);
+  const userId=await passwordResetService.reset(token,password);
+  authAudit('password_reset_completed',requestId,'completed',userId);
+  res.clearCookie(SESSION_COOKIE,clearCookieOptions);
+  res.setHeader('Cache-Control','no-store');
+  res.json({message:'Your password has been reset. Please sign in.'});
+}));
+app.post('/api/auth/logout',(_req,res)=>{res.clearCookie(SESSION_COOKIE,clearCookieOptions);res.status(204).end()});
 app.get('/api/auth/me',authenticate,(req,res)=>{res.setHeader('Cache-Control','no-store');res.json({user:req.user})});
 
 app.use('/api',authenticate);
 app.post('/api/auth/change-password',asyncRoute(async(req,res)=>{
-  const {currentPassword,newPassword}=parse(z.object({currentPassword:z.string().min(8),newPassword:z.string().min(10).regex(/[A-Z]/,'Password needs an uppercase letter').regex(/[0-9]/,'Password needs a number')}),req.body);
+  const {currentPassword,newPassword}=parse(z.object({currentPassword:z.string().min(8),newPassword:passwordSchema}),req.body);
   const account=await db.user.findUnique({where:{id:req.user!.id}});
   if(!account?.passwordHash||!(await bcrypt.compare(currentPassword,account.passwordHash)))return res.status(401).json({message:'Current password is incorrect'});
-  const user=await db.user.update({where:{id:account.id},data:{passwordHash:await bcrypt.hash(newPassword,12),mustChangePassword:false},include:{organization:true,driver:true}});
-  const session=publicUser(user);res.cookie(SESSION_COOKIE,jwt.sign(session,SECRET,{expiresIn:'8h'}),cookieOptions);res.setHeader('Cache-Control','no-store');
-  res.json({user:session,...(session.role===Role.DRIVER?{token:jwt.sign(session,SECRET,{expiresIn:'24h'})}:{})});
+  const user=await db.user.update({where:{id:account.id},data:{passwordHash:await bcrypt.hash(newPassword,12),mustChangePassword:false,sessionVersion:{increment:1}},include:{organization:true,driver:true}});
+  const session=publicUser(user);res.cookie(SESSION_COOKIE,jwt.sign({...session,sessionVersion:user.sessionVersion},SECRET,{expiresIn:'8h'}),cookieOptions);res.setHeader('Cache-Control','no-store');
+  res.json({user:session,...(session.role===Role.DRIVER?{token:jwt.sign({...session,sessionVersion:user.sessionVersion},SECRET,{expiresIn:'24h'})}:{})});
 }));
 app.use('/api/chat',createChatRouter(db));
 app.get('/api/profile',asyncRoute(async(req,res)=>res.json(await profileResponse(req.user!.id))));
@@ -286,8 +318,8 @@ app.get('/api/users',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{
   const users=await db.user.findMany({where:{organizationId:req.user!.organizationId},select:{id:true,name:true,email:true,role:true,isActive:true,lastLoginAt:true,lastActiveAt:true,createdAt:true,googleSub:true,driver:{select:{id:true,licenseNo:true,licenseCategory:true,licenseExpiry:true,onboardingStatus:true,reviewNote:true,status:true,payType:true,payRate:true,createdAt:true,documents:{select:{id:true,type:true,originalName:true,mimeType:true,size:true,createdAt:true},orderBy:{createdAt:'desc'}}}}},orderBy:{createdAt:'asc'}});
   res.json(users);
 }));
-const teamAccessSchema=z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/),role:z.enum(Role).refine(role=>role!==Role.OWNER&&role!==Role.DRIVER,'Driver accounts must be created from Driver Access')});
-const driverAccessSchema=z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/),contact:z.string().trim().min(7).max(30),payType:z.enum(DriverPayType).default(DriverPayType.PER_TRIP),payRate:z.coerce.number().nonnegative().default(0)});
+const teamAccessSchema=z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:passwordSchema,role:z.enum(Role).refine(role=>role!==Role.OWNER&&role!==Role.DRIVER,'Driver accounts must be created from Driver Access')});
+const driverAccessSchema=z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:passwordSchema,contact:z.string().trim().min(7).max(30),payType:z.enum(DriverPayType).default(DriverPayType.PER_TRIP),payRate:z.coerce.number().nonnegative().default(0)});
 app.post('/api/users',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{
   const {name,email,password,role}=parse(teamAccessSchema,req.body);
   if(req.user!.role===Role.ADMIN&&role===Role.ADMIN)return res.status(403).json({message:'Only the Owner can add another Admin'});
@@ -305,7 +337,7 @@ app.post('/api/driver-access',allow(Role.OWNER,Role.ADMIN,Role.FLEET_MANAGER),as
   });
   res.status(201).json({id:user.id,name:user.name,email:user.email,role:user.role,isActive:user.isActive,createdAt:user.createdAt});
 }));
-app.patch('/api/users/:id',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{const target=await db.user.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!target)throw Object.assign(new Error('Team member not found'),{status:404});if(target.role===Role.OWNER)return res.status(403).json({message:'Owner access cannot be changed'});const data=parse(z.object({role:z.enum(Role).refine(r=>r!==Role.OWNER).optional(),isActive:z.boolean().optional(),password:z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/).optional()}),req.body);if(req.user!.role===Role.ADMIN&&(target.role===Role.ADMIN||data.role===Role.ADMIN))return res.status(403).json({message:'Only the Owner can manage Admin access'});if(data.role&&data.role!==target.role&&(data.role===Role.DRIVER||target.role===Role.DRIVER))return res.status(409).json({message:'Driver access must be created as a new linked Driver account'});res.json(await db.user.update({where:{id:target.id},data:{role:data.role,isActive:data.isActive,...(data.password?{passwordHash:await bcrypt.hash(data.password,12),mustChangePassword:target.role===Role.DRIVER}:{})},select:{id:true,name:true,email:true,role:true,isActive:true,lastLoginAt:true,lastActiveAt:true,createdAt:true,googleSub:true}}))}));
+app.patch('/api/users/:id',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{const target=await db.user.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!target)throw Object.assign(new Error('Team member not found'),{status:404});if(target.role===Role.OWNER)return res.status(403).json({message:'Owner access cannot be changed'});const data=parse(z.object({role:z.enum(Role).refine(r=>r!==Role.OWNER).optional(),isActive:z.boolean().optional(),password:passwordSchema.optional()}),req.body);if(req.user!.role===Role.ADMIN&&(target.role===Role.ADMIN||data.role===Role.ADMIN))return res.status(403).json({message:'Only the Owner can manage Admin access'});if(data.role&&data.role!==target.role&&(data.role===Role.DRIVER||target.role===Role.DRIVER))return res.status(409).json({message:'Driver access must be created as a new linked Driver account'});res.json(await db.user.update({where:{id:target.id},data:{role:data.role,isActive:data.isActive,...(data.password?{passwordHash:await bcrypt.hash(data.password,12),mustChangePassword:target.role===Role.DRIVER,sessionVersion:{increment:1}}:{})},select:{id:true,name:true,email:true,role:true,isActive:true,lastLoginAt:true,lastActiveAt:true,createdAt:true,googleSub:true}}))}));
 app.get('/api/dashboard',asyncRoute(async(req,res)=>{
   const showRecentTrips=disclosurePolicyForRole(req.user!.role).recentTripDetails;
   const [vehicles,drivers,trips,recentTrips]=await Promise.all([
@@ -620,6 +652,6 @@ const allowFinancialAnalytics=(req:Request,res:Response,next:NextFunction)=>disc
 app.get('/api/analytics',allowFinancialAnalytics,asyncRoute(async(req,res)=>res.json(await analytics(req.user!.organizationId))));
 app.get('/api/analytics/export.csv',allowFinancialAnalytics,asyncRoute(async(req,res)=>{const a=await analytics(req.user!.organizationId);const csv=['Vehicle,Registration,Status,Completed Trips,Distance Km,Revenue,Fuel Cost,Maintenance Cost,Other Expenses,Operational Cost,Profit,Margin %,Cost Per Km,ROI %',...a.byVehicle.map(x=>`"${x.name}","${x.registrationNo}",${x.status},${x.completedTrips},${x.distanceKm.toFixed(2)},${x.revenue.toFixed(2)},${x.fuelCost.toFixed(2)},${x.maintenanceCost.toFixed(2)},${x.expenseCost.toFixed(2)},${x.operationalCost.toFixed(2)},${x.profit.toFixed(2)},${x.marginPercent?.toFixed(2)??''},${x.costPerKm?.toFixed(2)??''},${x.roi?.toFixed(2)??''}`)].join('\n');res.type('text/csv').attachment('fleetpilot-analytics.csv').send(csv);}));
 
-app.use((err:any,req:Request,res:Response,_next:NextFunction)=>{console.error(err);if(err instanceof multer.MulterError){const isDriverOnboarding=req.path.includes('/onboarding');return res.status(400).json({message:err.code==='LIMIT_FILE_SIZE'?`Image must be ${isDriverOnboarding?'8':'20'} MB or smaller`:'The image could not be uploaded'});}if(err instanceof AssignmentEligibilityError)return res.status(err.status).json({code:err.code,message:err.message,reasons:err.reasons});if(err instanceof Prisma.PrismaClientKnownRequestError){if(err.code==='P2002')return res.status(409).json({message:'A record with this unique value already exists'});if(err.code==='P2022')return res.status(503).json({message:'Database setup is incomplete. Please run the latest FleetPilot migration.'});return res.status(500).json({message:'The database could not complete this request'});}if(err instanceof Prisma.PrismaClientValidationError)return res.status(400).json({message:'The request contains invalid data'});res.status(err.status||500).json({message:err.status?err.message:'Something went wrong. Please try again.'});});
+app.use((err:any,req:Request,res:Response,_next:NextFunction)=>{console.error(err);if(err instanceof InvalidResetTokenError)return res.status(err.status).json({code:err.code,message:err.message});if(err instanceof multer.MulterError){const isDriverOnboarding=req.path.includes('/onboarding');return res.status(400).json({message:err.code==='LIMIT_FILE_SIZE'?`Image must be ${isDriverOnboarding?'8':'20'} MB or smaller`:'The image could not be uploaded'});}if(err instanceof AssignmentEligibilityError)return res.status(err.status).json({code:err.code,message:err.message,reasons:err.reasons});if(err instanceof Prisma.PrismaClientKnownRequestError){if(err.code==='P2002')return res.status(409).json({message:'A record with this unique value already exists'});if(err.code==='P2022')return res.status(503).json({message:'Database setup is incomplete. Please run the latest FleetPilot migration.'});return res.status(500).json({message:'The database could not complete this request'});}if(err instanceof Prisma.PrismaClientValidationError)return res.status(400).json({message:'The request contains invalid data'});res.status(err.status||500).json({message:err.status?err.message:'Something went wrong. Please try again.'});});
 app.listen(PORT,()=>console.log(`TransitOps API running at http://localhost:${PORT}`));
 process.on('SIGTERM',async()=>{await db.$disconnect();process.exit(0)});

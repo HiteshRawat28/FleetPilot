@@ -190,7 +190,9 @@ There is no driver-scoped completion endpoint. Do not call privileged `POST /api
 
 Render “Completion confirmation is handled by fleet operations.” Add a typed interface for a future `POST /api/driver/me/trips/:tripId/complete`, but do not invoke it until implemented.
 
-Do not invent push, refresh-token, forgot-password, background/live-GPS, WebSocket, or SSE APIs.
+Do not invent push, refresh-token, background/live-GPS, WebSocket, or SSE APIs.
+
+Password recovery is available. Request it with `POST /api/auth/forgot-password` and `{ email }`; always show the generic success message returned by the server. Submit `{ token, password }` to `POST /api/auth/reset-password`. Never reveal account existence or persist the raw reset token.
 
 ## Query keys and invalidation
 
