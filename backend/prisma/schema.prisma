@@ -116,26 +116,40 @@ enum TollMatchStatus {
 }
 
 model User {
-  id                 String          @id @default(cuid())
-  name               String
-  email              String          @unique
-  phone              String?
-  jobTitle           String?
-  avatarKey          String?
-  passwordHash       String?
-  googleSub          String?         @unique
-  role               Role
-  organizationId     String
-  organization       Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  isActive           Boolean         @default(true)
-  mustChangePassword Boolean         @default(false)
-  lastLoginAt        DateTime?
-  lastActiveAt       DateTime?
-  createdAt          DateTime        @default(now())
-  driver             Driver?
-  copilotActions     CopilotAction[]
+  id                  String               @id @default(cuid())
+  name                String
+  email               String               @unique
+  phone               String?
+  jobTitle            String?
+  avatarKey           String?
+  passwordHash        String?
+  googleSub           String?              @unique
+  role                Role
+  organizationId      String
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  isActive            Boolean              @default(true)
+  mustChangePassword  Boolean              @default(false)
+  sessionVersion      Int                  @default(0)
+  lastLoginAt         DateTime?
+  lastActiveAt        DateTime?
+  createdAt           DateTime             @default(now())
+  driver              Driver?
+  copilotActions      CopilotAction[]
+  passwordResetTokens PasswordResetToken[]
 
   @@index([organizationId])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, expiresAt])
 }
 
 model Organization {

@@ -11,4 +11,8 @@ export function sessionToken(headers:{authorization?:string;cookie?:string}){
   return bearer||cookieValue(headers.cookie,SESSION_COOKIE);
 }
 
+export function sessionVersionMatches(claimVersion: unknown, accountVersion: number) {
+  return (typeof claimVersion === 'number' ? claimVersion : 0) === accountVersion;
+}
+
 export function sessionCookieOptions(production:boolean){return{httpOnly:true,sameSite:'lax' as const,secure:production,path:'/api',maxAge:8*60*60*1000}}
