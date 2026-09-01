@@ -3,35 +3,38 @@ import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import multer from 'multer';
-import { createHmac, timingSafeEqual } from 'node:crypto';
-import { DriverDocumentType, DriverOnboardingStatus, ExpenseType, FastagConnectionStatus, FastagTransactionStatus, LicenseCategory, Prisma, PrismaClient, RecordSource, Role, TollMatchStatus, TripEvidenceType, TripStatus, VehicleStatus, DriverStatus, MaintenanceStatus } from '@prisma/client';
+import { Prisma, PrismaClient, Role, TripStatus, VehicleStatus, DriverStatus, MaintenanceStatus, LicenseCategory } from '@prisma/client';
 import { z } from 'zod';
 import { OAuth2Client } from 'google-auth-library';
-import { estimateRoutes, searchPlaces } from './constants/routePlanning';
-import { objectStorageConfigured, signedObjectUrl, uploadPrivateObject } from './services/objectStorage';
-import { extractDrivingLicense, extractOdometer, extractReceipt } from './services/ocr';
-import { createChatRouter } from './chat/chat';
-import { selectFastagTrip } from './services/fastagMatching';
 import { assertAssignmentEligible, AssignmentEligibilityError } from './services/assignmentEligibility';
+import { buildFuelPrediction, calculateTripProfitability, loadTripProfitabilityConfig } from './services/tripProfitability';
+import { buildHistoricalTollObservations, estimateHistoricalToll, resolveTollVehicleClass } from './services/historicalTollEstimate';
+import { estimateRoutes, searchPlaces, type Place } from './constants/routePlanning';
+import { createChatRouter } from './chat/chat';
+import { disclosurePolicyForRole } from './chat/security';
+import { SESSION_COOKIE, sessionCookieOptions, sessionToken } from './auth/session';
 
 const db = new PrismaClient();
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
 const SECRET = process.env.JWT_SECRET || 'development-only-change-me';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const tripProfitabilityConfig = loadTripProfitabilityConfig();
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173').split(',').map(origin => origin.trim());
-app.use(cors({ origin: (origin,callback) => !origin || allowedOrigins.includes(origin) ? callback(null,true) : callback(new Error('Origin is not allowed by CORS')), credentials: true }));
+const cookieOptions=sessionCookieOptions(process.env.NODE_ENV==='production');
+app.use((_req,res,next)=>{res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('Permissions-Policy','camera=(), microphone=(), geolocation=()');res.setHeader('Content-Security-Policy',"default-src 'none'; frame-ancestors 'none'");res.setHeader('Cross-Origin-Resource-Policy','same-site');next()});
+app.use(cors({ origin: (origin,callback) => !origin || allowedOrigins.includes(origin) ? callback(null,true) : callback(Object.assign(new Error('Origin is not allowed by CORS'),{status:403})), credentials: true }));
 app.use(express.json());
+app.use('/api',(req,res,next)=>{if(['GET','HEAD','OPTIONS'].includes(req.method)||!req.headers.origin||allowedOrigins.includes(req.headers.origin))return next();res.status(403).json({message:'Request origin is not allowed'})});
 
-type Session = { id:string; name:string; email:string; role:Role; organizationId:string; organizationName:string; driverId?:string; onboardingStatus?:DriverOnboardingStatus; mustChangePassword:boolean };
+type Session = { id:string; name:string; email:string; role:Role; organizationId:string; organizationName:string };
 declare global { namespace Express { interface Request { user?: Session } } }
 const asyncRoute = (fn:(req:Request,res:Response,next:NextFunction)=>Promise<unknown>) => (req:Request,res:Response,next:NextFunction) => { Promise.resolve(fn(req,res,next)).catch(next); };
 const authenticate = asyncRoute(async (req,res,next) => {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/,'');
+  const token = sessionToken({authorization:req.headers.authorization,cookie:req.headers.cookie});
   if (!token) return res.status(401).json({message:'Authentication required'});
-  try { const claims=jwt.verify(token,SECRET) as Session;const account=await db.user.findUnique({where:{id:claims.id},include:{organization:true,driverProfile:true}});if(!account||!account.isActive)return res.status(401).json({message:'This session no longer has access'});await db.user.update({where:{id:account.id},data:{lastActiveAt:new Date()}});req.user=publicUser(account);next(); }
+  try { const claims=jwt.verify(token,SECRET) as Session;const account=await db.user.findUnique({where:{id:claims.id},include:{organization:true}});if(!account||!account.isActive)return res.status(401).json({message:'This session no longer has access'});await db.user.update({where:{id:account.id},data:{lastActiveAt:new Date()}});req.user=publicUser(account);next(); }
   catch { res.status(401).json({message:'Session expired. Please sign in again.'}); }
 });
 const elevated = [Role.OWNER,Role.ADMIN];
@@ -39,47 +42,17 @@ const allow = (...roles:Role[]) => (req:Request,res:Response,next:NextFunction) 
 const parse = <T>(schema:z.ZodType<T>, data:unknown) => { const out=schema.safeParse(data); if(!out.success) throw Object.assign(new Error(out.error.issues[0]?.message || 'Invalid request'),{status:400}); return out.data; };
 const idParam = (req:Request) => String(req.params.id);
 const slugify = (name:string) => name.toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,45);
-const publicUser = (user:{id:string;name:string;email:string;role:Role;organizationId:string;organization:{name:string};mustChangePassword:boolean;driverProfile?:{id:string;onboardingStatus:DriverOnboardingStatus}|null}):Session => ({id:user.id,name:user.name,email:user.email,role:user.role,organizationId:user.organizationId,organizationName:user.organization.name,mustChangePassword:user.mustChangePassword,...(user.driverProfile?{driverId:user.driverProfile.id,onboardingStatus:user.driverProfile.onboardingStatus}:{})});
-const issueSession = (user:Session) => ({token:jwt.sign(user,SECRET,{expiresIn:'8h'}),user});
-const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:8*1024*1024,files:3},fileFilter:(_req,file,callback)=>/^image\/(jpeg|png|webp|heic|heif)$/.test(file.mimetype)?callback(null,true):callback(Object.assign(new Error('Only JPEG, PNG, WebP, or HEIC images are allowed'),{status:400}))});
-const normalizeRegistration=(value:string)=>value.toUpperCase().replace(/[^A-Z0-9]/g,'');
-const signedPrivateUrl=(objectKey:string|null|undefined)=>objectKey&&objectStorageConfigured()?signedObjectUrl(objectKey):Promise.resolve(null);
-const optionalPositiveNumber=z.preprocess(value=>value===''||value===null||value===undefined?undefined:value,z.coerce.number().positive().optional());
-const optionalNonnegativeNumber=z.preprocess(value=>value===''||value===null||value===undefined?undefined:value,z.coerce.number().nonnegative().optional());
-const fastagTransactionSchema=z.object({providerTxnId:z.string().trim().min(3).max(160),plazaName:z.string().trim().min(2).max(180),lane:z.string().trim().max(80).optional(),occurredAt:z.coerce.date(),amount:z.coerce.number().nonnegative(),currency:z.string().trim().length(3).default('INR'),status:z.enum(FastagTransactionStatus).default(FastagTransactionStatus.SETTLED),maskedTagId:z.string().trim().max(80).optional()});
-
-async function reconcileFastagTransaction(transactionId:string,forcedTripId?:string|null){
-  const transaction=await db.fastagTransaction.findUnique({where:{id:transactionId},include:{connection:true}});if(!transaction)return null;
-  let automaticConfidence=0;let trip=forcedTripId===null?null:forcedTripId?await db.trip.findFirst({where:{id:forcedTripId,organizationId:transaction.organizationId,vehicleId:transaction.vehicleId}}):null;if(forcedTripId&& !trip)throw Object.assign(new Error('The selected trip does not belong to this vehicle'),{status:409});if(forcedTripId===undefined){const candidates=await db.trip.findMany({where:{organizationId:transaction.organizationId,vehicleId:transaction.vehicleId,dispatchedAt:{not:null},status:{in:[TripStatus.DISPATCHED,TripStatus.IN_PROGRESS,TripStatus.COMPLETED]}},orderBy:{dispatchedAt:'desc'},take:20});const selected=selectFastagTrip(candidates,transaction.occurredAt);if(selected){trip=candidates.find(candidate=>candidate.id===selected.tripId)||null;automaticConfidence=selected.confidence}}
-  const matchStatus=trip?TollMatchStatus.MATCHED:forcedTripId===null?TollMatchStatus.UNMATCHED:TollMatchStatus.REVIEW_REQUIRED;
-  const matchConfidence=trip?(forcedTripId?1:automaticConfidence):0;
-  return db.$transaction(async tx=>{
-    let expenseId=transaction.expenseId;
-    if(transaction.status===FastagTransactionStatus.REVERSED&&expenseId){await tx.expense.update({where:{id:expenseId},data:{amount:0,description:`Reversed FASTag toll · ${transaction.plazaName}`}})}
-    else if(transaction.status===FastagTransactionStatus.SETTLED&&trip){
-      if(expenseId)await tx.expense.update({where:{id:expenseId},data:{tripId:trip.id,driverId:trip.driverId,amount:transaction.amount,date:transaction.occurredAt,vendor:transaction.plazaName,description:`FASTag toll · ${transaction.plazaName}${transaction.lane?` · ${transaction.lane}`:''}`}});
-      else {const expense=await tx.expense.create({data:{organizationId:transaction.organizationId,vehicleId:transaction.vehicleId,tripId:trip.id,driverId:trip.driverId,type:ExpenseType.TOLL,amount:transaction.amount,date:transaction.occurredAt,vendor:transaction.plazaName,description:`FASTag toll · ${transaction.plazaName}${transaction.lane?` · ${transaction.lane}`:''}`,source:RecordSource.FASTAG}});expenseId=expense.id}
-    }
-    return tx.fastagTransaction.update({where:{id:transaction.id},data:{tripId:trip?.id??null,expenseId,matchStatus,matchConfidence},include:{vehicle:true,trip:true,expense:true,connection:true}})
-  });
-}
-
-async function ingestFastagTransaction(connectionId:string,input:z.infer<typeof fastagTransactionSchema>,rawPayload?:unknown){
-  const connection=await db.fastagConnection.findUnique({where:{id:connectionId},include:{vehicle:true}});if(!connection||connection.status===FastagConnectionStatus.DISCONNECTED)throw Object.assign(new Error('Active FASTag connection not found'),{status:404});
-  const row=await db.fastagTransaction.upsert({where:{connectionId_providerTxnId:{connectionId,providerTxnId:input.providerTxnId}},create:{organizationId:connection.organizationId,connectionId,vehicleId:connection.vehicleId,...input,rawPayload:rawPayload===undefined?undefined:JSON.parse(JSON.stringify(rawPayload))},update:{plazaName:input.plazaName,lane:input.lane,occurredAt:input.occurredAt,amount:input.amount,currency:input.currency,status:input.status,maskedTagId:input.maskedTagId,rawPayload:rawPayload===undefined?undefined:JSON.parse(JSON.stringify(rawPayload))}});
-  await db.fastagConnection.update({where:{id:connection.id},data:{status:FastagConnectionStatus.ACTIVE,lastSyncedAt:new Date(),lastError:null}});return reconcileFastagTransaction(row.id);
-}
-
-function validFastagSignature(connectionId:string,body:unknown,signature:string|undefined){const secret=process.env.FASTAG_WEBHOOK_SECRET;if(!secret||!signature)return false;const expected=createHmac('sha256',secret).update(`${connectionId}.${JSON.stringify(body)}`).digest('hex');const supplied=signature.replace(/^sha256=/,'');return expected.length===supplied.length&&timingSafeEqual(Buffer.from(expected),Buffer.from(supplied))}
+const publicUser = (user:{id:string;name:string;email:string;role:Role;organizationId:string;organization:{name:string}}):Session => ({id:user.id,name:user.name,email:user.email,role:user.role,organizationId:user.organizationId,organizationName:user.organization.name});
+const sendSession = (res:Response,user:Session,status=200) => {res.cookie(SESSION_COOKIE,jwt.sign(user,SECRET,{expiresIn:'8h'}),cookieOptions);res.setHeader('Cache-Control','no-store');return res.status(status).json({user})};
 
 app.get('/api/health', (_req,res)=>res.json({status:'ok',service:'TransitOps API'}));
 app.post('/api/auth/login', asyncRoute(async(req,res)=>{
   const {email,password}=parse(z.object({email:z.email(),password:z.string().min(8)}),req.body);
-  const user=await db.user.findUnique({where:{email:email.toLowerCase()},include:{organization:true,driverProfile:true}});
+  const user=await db.user.findUnique({where:{email:email.toLowerCase()},include:{organization:true}});
   if(!user || !user.passwordHash || !(await bcrypt.compare(password,user.passwordHash))) return res.status(401).json({message:'Email or password is incorrect'});
   if(!user.isActive) return res.status(403).json({message:'Your account has been suspended. Contact your company administrator.'});
   await db.user.update({where:{id:user.id},data:{lastLoginAt:new Date(),lastActiveAt:new Date()}});
-  res.json(issueSession(publicUser(user)));
+  sendSession(res,publicUser(user));
 }));
 app.post('/api/auth/register', asyncRoute(async(req,res)=>{
   const {name,email,password,companyName}=parse(z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:z.string().min(10).regex(/[A-Z]/,'Password needs an uppercase letter').regex(/[0-9]/,'Password needs a number'),companyName:z.string().trim().min(2).max(100)}),req.body);
@@ -91,338 +64,174 @@ app.post('/api/auth/register', asyncRoute(async(req,res)=>{
     const organization=await tx.organization.create({data:{name:companyName,slug,operationsEmail:normalizedEmail}});
     return tx.user.create({data:{name,email:normalizedEmail,passwordHash:await bcrypt.hash(password,12),role:Role.OWNER,organizationId:organization.id,lastLoginAt:new Date(),lastActiveAt:new Date()},include:{organization:true}});
   });
-  res.status(201).json(issueSession(publicUser(user)));
+  sendSession(res,publicUser(user),201);
 }));
 app.post('/api/auth/google', asyncRoute(async(req,res)=>{
   if(!GOOGLE_CLIENT_ID) return res.status(503).json({message:'Google sign-in is not configured yet'});
   const {credential,intent,companyName}=parse(z.object({credential:z.string().min(20),intent:z.enum(['login','register']),companyName:z.string().trim().min(2).max(100).optional()}),req.body);
   const ticket=await googleClient.verifyIdToken({idToken:credential,audience:GOOGLE_CLIENT_ID}); const payload=ticket.getPayload();
   if(!payload?.sub||!payload.email||!payload.email_verified) return res.status(401).json({message:'Google could not verify this email'});
-  const email=payload.email.toLowerCase(); let user=await db.user.findUnique({where:{email},include:{organization:true,driverProfile:true}});
+  const email=payload.email.toLowerCase(); let user=await db.user.findUnique({where:{email},include:{organization:true}});
   if(!user){
     if(intent!=='register'||!companyName) return res.status(404).json({message:'No FleetPilot account found. Create your company workspace first.'});
     const base=slugify(companyName)||'company'; let slug=base; let suffix=1; while(await db.organization.findUnique({where:{slug}}))slug=`${base}-${++suffix}`;
-    user=await db.$transaction(async tx=>{const organization=await tx.organization.create({data:{name:companyName,slug,operationsEmail:email}});return tx.user.create({data:{name:payload.name||email.split('@')[0],email,googleSub:payload.sub,role:Role.OWNER,organizationId:organization.id,lastLoginAt:new Date(),lastActiveAt:new Date()},include:{organization:true,driverProfile:true}})});
+    user=await db.$transaction(async tx=>{const organization=await tx.organization.create({data:{name:companyName,slug,operationsEmail:email}});return tx.user.create({data:{name:payload.name||email.split('@')[0],email,googleSub:payload.sub,role:Role.OWNER,organizationId:organization.id,lastLoginAt:new Date(),lastActiveAt:new Date()},include:{organization:true}})});
   } else {
     if(!user.isActive)return res.status(403).json({message:'Your account has been suspended. Contact your company administrator.'});
     if(user.googleSub&&user.googleSub!==payload.sub)return res.status(409).json({message:'This email is linked to another Google identity'});
-    user=await db.user.update({where:{id:user.id},data:{googleSub:payload.sub,lastLoginAt:new Date(),lastActiveAt:new Date()},include:{organization:true,driverProfile:true}});
+    user=await db.user.update({where:{id:user.id},data:{googleSub:payload.sub,lastLoginAt:new Date(),lastActiveAt:new Date()},include:{organization:true}});
   }
-  res.json(issueSession(publicUser(user)));
+  sendSession(res,publicUser(user));
 }));
-app.get('/api/auth/me',authenticate,(req,res)=>res.json({user:req.user}));
-
-app.post('/api/fastag/webhook/:connectionId',asyncRoute(async(req,res)=>{const connectionId=String(req.params.connectionId);if(!validFastagSignature(connectionId,req.body,String(req.headers['x-fastag-signature']||'')))return res.status(401).json({message:'Invalid FASTag webhook signature'});const data=parse(fastagTransactionSchema,req.body);res.status(202).json(await ingestFastagTransaction(connectionId,data,req.body))}));
-
-app.post('/api/driver/auth/register',asyncRoute(async(req,res)=>{
-  return res.status(410).json({message:'Driver self-registration is disabled. Ask your company Owner, Administrator, or Fleet Manager to create your access.'});
-  /* Legacy implementation retained temporarily for data-migration reference.
-  const {companyCode,name,contact,email,password}=parse(z.object({companyCode:z.string().trim().min(2).max(60),name:z.string().trim().min(2).max(80),contact:z.string().trim().min(7).max(20),email:z.email(),password:z.string().min(10).regex(/[A-Z]/,'Password needs an uppercase letter').regex(/[0-9]/,'Password needs a number')}),req.body);
-  const organization=await db.organization.findFirst({where:{OR:[{slug:companyCode.toLowerCase()},{name:{equals:companyCode,mode:'insensitive'}}]}});
-  if(!organization)return res.status(404).json({message:'Company workspace not found'});
-  const normalizedEmail=email.toLowerCase();if(await db.user.findUnique({where:{email:normalizedEmail}}))return res.status(409).json({message:'An account already exists for this email'});
-  const user=await db.$transaction(async tx=>{
-    const account=await tx.user.create({data:{name,email:normalizedEmail,passwordHash:await bcrypt.hash(password,12),role:Role.DRIVER,organizationId:organization.id,lastLoginAt:new Date(),lastActiveAt:new Date()}});
-    await tx.driver.create({data:{name,contact,licenseNo:`PENDING-${account.id}`,licenseCategory:'PENDING',licenseExpiry:new Date(),status:DriverStatus.OFF_DUTY,onboardingStatus:DriverOnboardingStatus.PENDING,userId:account.id,organizationId:organization.id}});
-    return tx.user.findUniqueOrThrow({where:{id:account.id},include:{organization:true,driverProfile:true}});
-  });
-  res.status(201).json(issueSession(publicUser(user)));
-  */
-}));
+app.post('/api/auth/logout',(_req,res)=>{const {maxAge:_maxAge,...clearCookieOptions}=cookieOptions;res.clearCookie(SESSION_COOKIE,clearCookieOptions);res.status(204).end()});
+app.get('/api/auth/me',authenticate,(req,res)=>{res.setHeader('Cache-Control','no-store');res.json({user:req.user})});
 
 app.use('/api',authenticate);
 app.use('/api/chat',createChatRouter(db));
-app.post('/api/auth/change-password',asyncRoute(async(req,res)=>{const {currentPassword,newPassword}=parse(z.object({currentPassword:z.string().min(8),newPassword:z.string().min(10).regex(/[A-Z]/,'Password needs an uppercase letter').regex(/[0-9]/,'Password needs a number')}),req.body);const account=await db.user.findUnique({where:{id:req.user!.id}});if(!account?.passwordHash||!(await bcrypt.compare(currentPassword,account.passwordHash)))return res.status(401).json({message:'Current password is incorrect'});await db.user.update({where:{id:account.id},data:{passwordHash:await bcrypt.hash(newPassword,12),mustChangePassword:false}});res.json({message:'Password changed successfully'})}));
-app.get('/api/organization',allow(Role.FLEET_MANAGER,Role.DISPATCHER,Role.SAFETY_OFFICER,Role.FINANCIAL_ANALYST),asyncRoute(async(req,res)=>res.json(await db.organization.findUnique({where:{id:req.user!.organizationId}}))));
+app.get('/api/organization',asyncRoute(async(req,res)=>res.json(await db.organization.findUnique({where:{id:req.user!.organizationId}}))));
 app.put('/api/organization',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{const data=parse(z.object({name:z.string().trim().min(2).max(100),operationsEmail:z.email().optional()}),req.body);res.json(await db.organization.update({where:{id:req.user!.organizationId},data}))}));
-app.get('/api/users',allow(Role.OWNER,Role.ADMIN,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>res.json(await db.user.findMany({where:{organizationId:req.user!.organizationId,...(req.user!.role===Role.FLEET_MANAGER?{role:Role.DRIVER}:{})},select:{id:true,name:true,email:true,role:true,isActive:true,mustChangePassword:true,lastLoginAt:true,lastActiveAt:true,createdAt:true,googleSub:true,driverProfile:{select:{id:true,onboardingStatus:true,status:true}}},orderBy:{createdAt:'asc'}}))));
-app.get('/api/driver-access',allow(Role.OWNER,Role.ADMIN,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const drivers=await db.driver.findMany({
-    where:{organizationId:req.user!.organizationId,userId:{not:null}},
-    include:{
-      user:{select:{id:true,email:true,isActive:true,mustChangePassword:true,lastLoginAt:true,lastActiveAt:true,createdAt:true}},
-      documents:{select:{id:true,type:true,objectKey:true,ocrConfidence:true,createdAt:true}},
-      trips:{where:{status:{in:[TripStatus.DISPATCHED,TripStatus.IN_PROGRESS]}},select:{id:true,tripNo:true,source:true,destination:true,status:true,vehicle:{select:{id:true,name:true,registrationNo:true}}},orderBy:{createdAt:'desc'},take:1},
-      tripEvidence:{select:{createdAt:true},orderBy:{createdAt:'desc'},take:1},
-      _count:{select:{documents:true,trips:true,tripEvidence:true,fuelLogs:true,expenses:true,maintenance:true}}
-    },
-    orderBy:{createdAt:'desc'}
-  });
-  const now=Date.now();
-  const roster=await Promise.all(drivers.map(async driver=>{
-    const documentTypes=new Set(driver.documents.map(document=>document.type));
-    const profilePhoto=driver.documents.find(document=>document.type===DriverDocumentType.PROFILE_PHOTO);
-    const lastActiveAt=driver.user?.lastActiveAt||null;
-    const inactiveMinutes=lastActiveAt?(now-lastActiveAt.getTime())/60_000:null;
-    const syncState=inactiveMinutes===null?'NEVER':inactiveMinutes<=5?'ONLINE':inactiveMinutes<=1440?'RECENT':'OFFLINE';
-    const readinessIssues:string[]=[];
-    if(!driver.user?.isActive)readinessIssues.push('Account suspended');
-    if(driver.user?.mustChangePassword)readinessIssues.push('Temporary password not changed');
-    if(!documentTypes.has(DriverDocumentType.PROFILE_PHOTO))readinessIssues.push('Live profile photo required');
-    if(!documentTypes.has(DriverDocumentType.LICENSE_FRONT)||!documentTypes.has(DriverDocumentType.LICENSE_BACK))readinessIssues.push('Both licence images required');
-    if(driver.onboardingStatus!==DriverOnboardingStatus.VERIFIED)readinessIssues.push('Company approval pending');
-    if(driver.licenseCategory==='PENDING')readinessIssues.push('Licence category pending');
-    if(driver.licenseExpiry.getTime()<=now)readinessIssues.push('Licence expired');
-    const {documents,tripEvidence,trips,...safeDriver}=driver;
-    return {...safeDriver,documentTypes:[...documentTypes],profilePhotoUrl:profilePhoto?await signedPrivateUrl(profilePhoto.objectKey):null,currentTrip:trips[0]||null,lastEvidenceAt:tripEvidence[0]?.createdAt||null,syncState,readinessIssues,readyForDispatch:readinessIssues.length===0};
-  }));
-  res.json({
-    summary:{total:roster.length,active:roster.filter(driver=>driver.user?.isActive).length,verified:roster.filter(driver=>driver.onboardingStatus===DriverOnboardingStatus.VERIFIED).length,online:roster.filter(driver=>driver.syncState==='ONLINE').length,needsAttention:roster.filter(driver=>!driver.readyForDispatch).length},
-    drivers:roster
-  });
-}));
-app.post('/api/users',allow(Role.OWNER,Role.ADMIN,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const {name,email,password,role,contact}=parse(z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/),role:z.enum(Role).refine(r=>r!==Role.OWNER,'Owner access cannot be assigned here'),contact:z.string().trim().min(7).max(20).optional()}),req.body);
-  if(req.user!.role===Role.FLEET_MANAGER&&role!==Role.DRIVER)return res.status(403).json({message:'Fleet Managers can create driver access only'});
-  if(req.user!.role===Role.ADMIN&&role===Role.ADMIN)return res.status(403).json({message:'Only the Owner can add another Admin'});
-  if(role===Role.DRIVER&&!contact)return res.status(400).json({message:'A contact number is required for driver access'});
-  const normalizedEmail=email.toLowerCase();if(await db.user.findUnique({where:{email:normalizedEmail}}))return res.status(409).json({message:'An account already exists for this email'});
-  const account=await db.$transaction(async tx=>{const user=await tx.user.create({data:{name,email:normalizedEmail,passwordHash:await bcrypt.hash(password,12),role,organizationId:req.user!.organizationId,mustChangePassword:true}});if(role===Role.DRIVER)await tx.driver.create({data:{name,contact:contact!,licenseNo:`PENDING-${user.id}`,licenseCategory:'PENDING',licenseExpiry:new Date(),status:DriverStatus.OFF_DUTY,onboardingStatus:DriverOnboardingStatus.PENDING,userId:user.id,organizationId:req.user!.organizationId}});return tx.user.findUniqueOrThrow({where:{id:user.id},select:{id:true,name:true,email:true,role:true,isActive:true,mustChangePassword:true,createdAt:true,driverProfile:{select:{id:true,onboardingStatus:true,status:true}}}})});
-  res.status(201).json(account);
-}));
-app.patch('/api/users/:id',allow(Role.OWNER,Role.ADMIN,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const target=await db.user.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId},include:{driverProfile:true}});if(!target)throw Object.assign(new Error('Team member not found'),{status:404});if(target.role===Role.OWNER)return res.status(403).json({message:'Owner access cannot be changed'});
-  const data=parse(z.object({role:z.enum(Role).refine(r=>r!==Role.OWNER&&r!==Role.DRIVER,'Driver roles are managed through Driver Access').optional(),isActive:z.boolean().optional(),password:z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/).optional()}),req.body);
-  if(req.user!.role===Role.FLEET_MANAGER&&target.role!==Role.DRIVER)return res.status(403).json({message:'Fleet Managers can manage driver access only'});if(target.role===Role.DRIVER&&data.role)return res.status(409).json({message:'A linked Driver role cannot be changed'});if(req.user!.role===Role.ADMIN&&(target.role===Role.ADMIN||data.role===Role.ADMIN))return res.status(403).json({message:'Only the Owner can manage Admin access'});
-  const updated=await db.$transaction(async tx=>{
-    if(target.driverProfile&&data.isActive!==undefined){let status:DriverStatus=DriverStatus.SUSPENDED;if(data.isActive){const activeTrip=await tx.trip.count({where:{driverId:target.driverProfile.id,status:{in:[TripStatus.DISPATCHED,TripStatus.IN_PROGRESS]}}});status=activeTrip?DriverStatus.ON_TRIP:target.driverProfile.onboardingStatus===DriverOnboardingStatus.VERIFIED?DriverStatus.AVAILABLE:DriverStatus.OFF_DUTY}await tx.driver.update({where:{id:target.driverProfile.id},data:{status}})}
-    return tx.user.update({where:{id:target.id},data:{role:data.role,isActive:data.isActive,...(data.password?{passwordHash:await bcrypt.hash(data.password,12),mustChangePassword:true}:{})},select:{id:true,name:true,email:true,role:true,isActive:true,mustChangePassword:true,lastLoginAt:true,lastActiveAt:true,createdAt:true,googleSub:true,driverProfile:{select:{id:true,onboardingStatus:true,status:true}}}})
-  });
-  res.json(updated);
-}));
-app.get('/api/dashboard',allow(Role.FLEET_MANAGER,Role.DISPATCHER,Role.SAFETY_OFFICER,Role.FINANCIAL_ANALYST),asyncRoute(async(req,res)=>{
+app.get('/api/users',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>res.json(await db.user.findMany({where:{organizationId:req.user!.organizationId},select:{id:true,name:true,email:true,role:true,isActive:true,lastLoginAt:true,lastActiveAt:true,createdAt:true,googleSub:true},orderBy:{createdAt:'asc'}}))));
+app.post('/api/users',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{const {name,email,password,role}=parse(z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/),role:z.enum(Role).refine(r=>r!==Role.OWNER,'Owner access cannot be assigned here')}),req.body);if(req.user!.role===Role.ADMIN&&role===Role.ADMIN)return res.status(403).json({message:'Only the Owner can add another Admin'});const passwordHash=await bcrypt.hash(password,12);res.status(201).json(await db.user.create({data:{name,email:email.toLowerCase(),passwordHash,role,organizationId:req.user!.organizationId},select:{id:true,name:true,email:true,role:true,isActive:true,createdAt:true}}))}));
+app.patch('/api/users/:id',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{const target=await db.user.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!target)throw Object.assign(new Error('Team member not found'),{status:404});if(target.role===Role.OWNER)return res.status(403).json({message:'Owner access cannot be changed'});const data=parse(z.object({role:z.enum(Role).refine(r=>r!==Role.OWNER).optional(),isActive:z.boolean().optional(),password:z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/).optional()}),req.body);if(req.user!.role===Role.ADMIN&&(target.role===Role.ADMIN||data.role===Role.ADMIN))return res.status(403).json({message:'Only the Owner can manage Admin access'});res.json(await db.user.update({where:{id:target.id},data:{role:data.role,isActive:data.isActive,...(data.password?{passwordHash:await bcrypt.hash(data.password,12)}:{})},select:{id:true,name:true,email:true,role:true,isActive:true,lastLoginAt:true,lastActiveAt:true,createdAt:true,googleSub:true}}))}));
+app.get('/api/dashboard',asyncRoute(async(req,res)=>{
+  const showRecentTrips=disclosurePolicyForRole(req.user!.role).recentTripDetails;
   const [vehicles,drivers,trips,recentTrips]=await Promise.all([
     db.vehicle.groupBy({by:['status'],where:{organizationId:req.user!.organizationId},_count:true}),db.driver.groupBy({by:['status'],where:{organizationId:req.user!.organizationId},_count:true}),db.trip.groupBy({by:['status'],where:{organizationId:req.user!.organizationId},_count:true}),
-    db.trip.findMany({where:{organizationId:req.user!.organizationId},take:6,orderBy:{createdAt:'desc'},include:{vehicle:true,driver:true}})
+    showRecentTrips?db.trip.findMany({where:{organizationId:req.user!.organizationId},take:6,orderBy:{createdAt:'desc'},select:{id:true,tripNo:true,source:true,destination:true,status:true,vehicle:{select:{name:true}},driver:{select:{name:true}}}}):Promise.resolve([])
   ]);
   const vc=Object.fromEntries(vehicles.map(x=>[x.status,x._count])); const dc=Object.fromEntries(drivers.map(x=>[x.status,x._count])); const tc=Object.fromEntries(trips.map(x=>[x.status,x._count]));
   const active=(vc.AVAILABLE||0)+(vc.ON_TRIP||0)+(vc.IN_SHOP||0); const utilized=vc.ON_TRIP||0;
-  res.json({kpis:{activeVehicles:active,availableVehicles:vc.AVAILABLE||0,inMaintenance:vc.IN_SHOP||0,activeTrips:(tc.DISPATCHED||0)+(tc.IN_PROGRESS||0),pendingTrips:tc.DRAFT||0,driversOnDuty:dc.ON_TRIP||0,fleetUtilization:active?Math.round(utilized/active*100):0},vehicleStatus:vc,recentTrips});
+  res.json({kpis:{activeVehicles:active,availableVehicles:vc.AVAILABLE||0,inMaintenance:vc.IN_SHOP||0,activeTrips:tc.DISPATCHED||0,pendingTrips:tc.DRAFT||0,driversOnDuty:dc.ON_TRIP||0,fleetUtilization:active?Math.round(utilized/active*100):0},vehicleStatus:vc,recentTrips});
 }));
 
-const vehicleSchema=z.object({registrationNo:z.string().min(3),name:z.string().min(2),type:z.string().min(2),capacityKg:z.coerce.number().positive(),requiredLicenseCategory:z.enum(LicenseCategory).default(LicenseCategory.LMV),odometerKm:z.coerce.number().nonnegative(),acquisitionCost:z.coerce.number().nonnegative(),status:z.enum(VehicleStatus).default(VehicleStatus.AVAILABLE),region:z.string().default('Central')});
-const fastagConnectionSchema=z.object({provider:z.string().trim().min(2).max(80),issuerName:z.string().trim().min(2).max(120),maskedTagId:z.string().trim().max(80).optional(),externalCustomerId:z.string().trim().max(120).optional()});
-const vehicleRegistrationSchema=vehicleSchema.extend({fastag:fastagConnectionSchema.optional()});
+const vehicleSchema=z.object({registrationNo:z.string().min(3),name:z.string().min(2),type:z.string().min(2),capacityKg:z.coerce.number().positive(),requiredLicenseCategory:z.enum(LicenseCategory),odometerKm:z.coerce.number().nonnegative(),acquisitionCost:z.coerce.number().nonnegative(),status:z.enum(VehicleStatus).default(VehicleStatus.AVAILABLE),region:z.string().default('Central')});
 app.get('/api/vehicles',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
   const q=String(req.query.q||''); const status=req.query.status as VehicleStatus|undefined; const type=String(req.query.type||'');
-  res.json(await db.vehicle.findMany({where:{AND:[{organizationId:req.user!.organizationId},q?{OR:[{registrationNo:{contains:q,mode:'insensitive'}},{name:{contains:q,mode:'insensitive'}}]}:{},status?{status}:{},type?{type}:{ }]},include:{fastagConnection:true},orderBy:{createdAt:'desc'}}));
+  res.json(await db.vehicle.findMany({where:{AND:[{organizationId:req.user!.organizationId},q?{OR:[{registrationNo:{contains:q,mode:'insensitive'}},{name:{contains:q,mode:'insensitive'}}]}:{},status?{status}:{},type?{type}:{ }]},orderBy:{createdAt:'desc'}}));
 }));
 app.get('/api/vehicles/available',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>res.json(await db.vehicle.findMany({where:{organizationId:req.user!.organizationId,status:VehicleStatus.AVAILABLE},orderBy:{name:'asc'}}))));
-app.post('/api/vehicles',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const {fastag,...vehicle}=parse(vehicleRegistrationSchema,req.body);
-  const created=await db.$transaction(async tx=>{
-    const row=await tx.vehicle.create({data:{...vehicle,organizationId:req.user!.organizationId}});
-    if(fastag)await tx.fastagConnection.create({data:{...fastag,organizationId:req.user!.organizationId,vehicleId:row.id,status:FastagConnectionStatus.PENDING}});
-    return tx.vehicle.findUniqueOrThrow({where:{id:row.id},include:{fastagConnection:true}});
-  });
-  res.status(201).json(created);
-}));
+app.post('/api/vehicles',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>res.status(201).json(await db.vehicle.create({data:{...parse(vehicleSchema,req.body),organizationId:req.user!.organizationId}}))));
 app.put('/api/vehicles/:id',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const row=await db.vehicle.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!row)throw Object.assign(new Error('Vehicle not found'),{status:404});res.json(await db.vehicle.update({where:{id:row.id},data:parse(vehicleSchema.partial(),req.body)}))}));
 app.delete('/api/vehicles/:id',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const row=await db.vehicle.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!row)throw Object.assign(new Error('Vehicle not found'),{status:404});await db.vehicle.delete({where:{id:row.id}});res.status(204).end();}));
 
-app.get('/api/fastag/connections',allow(Role.FLEET_MANAGER,Role.FINANCIAL_ANALYST,Role.DISPATCHER),asyncRoute(async(req,res)=>res.json(await db.fastagConnection.findMany({where:{organizationId:req.user!.organizationId},include:{vehicle:true,_count:{select:{transactions:true}}},orderBy:{updatedAt:'desc'}}))));
-app.get('/api/fastag/vehicles',allow(Role.FLEET_MANAGER,Role.FINANCIAL_ANALYST),asyncRoute(async(req,res)=>res.json(await db.vehicle.findMany({where:{organizationId:req.user!.organizationId},select:{id:true,name:true,registrationNo:true},orderBy:{registrationNo:'asc'}}))));
-app.get('/api/fastag/matchable-trips',allow(Role.FLEET_MANAGER,Role.FINANCIAL_ANALYST,Role.DISPATCHER),asyncRoute(async(req,res)=>res.json(await db.trip.findMany({where:{organizationId:req.user!.organizationId,status:{in:[TripStatus.DISPATCHED,TripStatus.IN_PROGRESS,TripStatus.COMPLETED]}},select:{id:true,tripNo:true,source:true,destination:true,vehicle:{select:{id:true}}},orderBy:{createdAt:'desc'},take:500}))));
-app.post('/api/vehicles/:id/fastag',allow(Role.FLEET_MANAGER,Role.FINANCIAL_ANALYST),asyncRoute(async(req,res)=>{const vehicle=await db.vehicle.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!vehicle)throw Object.assign(new Error('Vehicle not found'),{status:404});const data=parse(fastagConnectionSchema,req.body);res.status(201).json(await db.fastagConnection.upsert({where:{vehicleId:vehicle.id},create:{...data,organizationId:req.user!.organizationId,vehicleId:vehicle.id,status:FastagConnectionStatus.PENDING},update:{...data,status:FastagConnectionStatus.PENDING,lastError:null},include:{vehicle:true}}))}));
-app.post('/api/vehicles/:id/fastag/disconnect',allow(Role.FLEET_MANAGER,Role.FINANCIAL_ANALYST),asyncRoute(async(req,res)=>{const connection=await db.fastagConnection.findFirst({where:{vehicleId:idParam(req),organizationId:req.user!.organizationId}});if(!connection)throw Object.assign(new Error('FASTag connection not found'),{status:404});res.json(await db.fastagConnection.update({where:{id:connection.id},data:{status:FastagConnectionStatus.DISCONNECTED},include:{vehicle:true}}))}));
-app.post('/api/vehicles/:id/fastag/transactions',allow(Role.FLEET_MANAGER,Role.FINANCIAL_ANALYST),asyncRoute(async(req,res)=>{const connection=await db.fastagConnection.findFirst({where:{vehicleId:idParam(req),organizationId:req.user!.organizationId,status:{not:FastagConnectionStatus.DISCONNECTED}}});if(!connection)throw Object.assign(new Error('Connect this vehicle to its FASTag issuer first'),{status:409});const data=parse(fastagTransactionSchema,req.body);res.status(201).json(await ingestFastagTransaction(connection.id,data,req.body))}));
-app.post('/api/vehicles/:id/fastag/sync',allow(Role.FLEET_MANAGER,Role.FINANCIAL_ANALYST),asyncRoute(async(req,res)=>{const connection=await db.fastagConnection.findFirst({where:{vehicleId:idParam(req),organizationId:req.user!.organizationId,status:{not:FastagConnectionStatus.DISCONNECTED}},include:{vehicle:true}});if(!connection)throw Object.assign(new Error('Connected FASTag account not found'),{status:404});const base=process.env.FASTAG_PROVIDER_BASE_URL?.replace(/\/$/,'');const token=process.env.FASTAG_PROVIDER_API_TOKEN;if(!base||!token)throw Object.assign(new Error('Live issuer synchronization is not configured. Webhook and statement ingestion remain available.'),{status:503});try{const response=await fetch(`${base}/transactions?vehicleRegistrationNo=${encodeURIComponent(normalizeRegistration(connection.vehicle.registrationNo))}&since=${encodeURIComponent((connection.lastSyncedAt||new Date(Date.now()-7*86400_000)).toISOString())}`,{headers:{Authorization:`Bearer ${token}`,'X-Customer-Reference':connection.externalCustomerId||''},signal:AbortSignal.timeout(10000)});if(!response.ok)throw new Error(`Issuer returned ${response.status}`);const payload=await response.json() as {transactions?:unknown[]};const rows=[];for(const item of payload.transactions||[]){const data=parse(fastagTransactionSchema,item);rows.push(await ingestFastagTransaction(connection.id,data,item))}if(!rows.length)await db.fastagConnection.update({where:{id:connection.id},data:{status:FastagConnectionStatus.ACTIVE,lastSyncedAt:new Date(),lastError:null}});res.json({synchronized:rows.length,transactions:rows})}catch(error){await db.fastagConnection.update({where:{id:connection.id},data:{status:FastagConnectionStatus.ERROR,lastError:(error as Error).message}});throw Object.assign(new Error('FASTag issuer synchronization failed. Existing accounting data was not changed.'),{status:503})}}));
-app.get('/api/fastag/transactions',allow(Role.FLEET_MANAGER,Role.FINANCIAL_ANALYST,Role.DISPATCHER),asyncRoute(async(req,res)=>{const matchStatus=req.query.matchStatus?parse(z.enum(TollMatchStatus),String(req.query.matchStatus)):undefined;const transactions=await db.fastagTransaction.findMany({where:{organizationId:req.user!.organizationId,...(matchStatus?{matchStatus}:{})},include:{vehicle:true,trip:{select:{id:true,tripNo:true,source:true,destination:true}},expense:true,connection:true},orderBy:{occurredAt:'desc'},take:250});res.json(transactions.map(({rawPayload,...transaction})=>transaction))}));
-app.post('/api/fastag/transactions/:id/match',allow(Role.FLEET_MANAGER,Role.FINANCIAL_ANALYST),asyncRoute(async(req,res)=>{const transaction=await db.fastagTransaction.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!transaction)throw Object.assign(new Error('FASTag transaction not found'),{status:404});const {tripId}=parse(z.object({tripId:z.string().nullable()}),req.body);res.json(await reconcileFastagTransaction(transaction.id,tripId))}));
-
-async function pollFastagProviders(){const base=process.env.FASTAG_PROVIDER_BASE_URL?.replace(/\/$/,''),token=process.env.FASTAG_PROVIDER_API_TOKEN;if(!base||!token)return;const connections=await db.fastagConnection.findMany({where:{status:{in:[FastagConnectionStatus.PENDING,FastagConnectionStatus.ACTIVE,FastagConnectionStatus.ERROR]}},include:{vehicle:true}});for(const connection of connections){try{const response=await fetch(`${base}/transactions?vehicleRegistrationNo=${encodeURIComponent(normalizeRegistration(connection.vehicle.registrationNo))}&since=${encodeURIComponent((connection.lastSyncedAt||new Date(Date.now()-7*86400_000)).toISOString())}`,{headers:{Authorization:`Bearer ${token}`,'X-Customer-Reference':connection.externalCustomerId||''},signal:AbortSignal.timeout(10000)});if(!response.ok)throw new Error(`Issuer returned ${response.status}`);const payload=await response.json() as {transactions?:unknown[]};for(const item of payload.transactions||[])await ingestFastagTransaction(connection.id,parse(fastagTransactionSchema,item),item);if(!payload.transactions?.length)await db.fastagConnection.update({where:{id:connection.id},data:{status:FastagConnectionStatus.ACTIVE,lastSyncedAt:new Date(),lastError:null}})}catch(error){await db.fastagConnection.update({where:{id:connection.id},data:{status:FastagConnectionStatus.ERROR,lastError:(error as Error).message}}).catch(()=>undefined)}}}
-
-const driverSchema=z.object({name:z.string().min(2),licenseNo:z.string().min(3),licenseCategory:z.string().min(2),licenseExpiry:z.coerce.date(),contact:z.string().min(7),safetyScore:z.coerce.number().int().min(0).max(100),status:z.enum(DriverStatus).default(DriverStatus.AVAILABLE)});
-app.get('/api/drivers',allow(Role.FLEET_MANAGER,Role.SAFETY_OFFICER),asyncRoute(async(req,res)=>{const q=String(req.query.q||'');res.json(await db.driver.findMany({where:{organizationId:req.user!.organizationId,...(q?{OR:[{name:{contains:q,mode:'insensitive'}},{licenseNo:{contains:q,mode:'insensitive'}}]}:{})},include:{user:{select:{email:true,isActive:true}},_count:{select:{documents:true,trips:true}}},orderBy:{createdAt:'desc'}}));}));
+const driverSchema=z.object({name:z.string().min(2),licenseNo:z.string().min(3),licenseCategory:z.enum(LicenseCategory),licenseExpiry:z.coerce.date(),contact:z.string().min(7),safetyScore:z.coerce.number().int().min(0).max(100),status:z.enum(DriverStatus).default(DriverStatus.AVAILABLE)});
+app.get('/api/drivers',allow(Role.FLEET_MANAGER,Role.SAFETY_OFFICER),asyncRoute(async(req,res)=>{const q=String(req.query.q||'');res.json(await db.driver.findMany({where:{organizationId:req.user!.organizationId,...(q?{OR:[{name:{contains:q,mode:'insensitive'}},{licenseNo:{contains:q,mode:'insensitive'}}]}:{})},orderBy:{createdAt:'desc'}}));}));
 app.get('/api/drivers/available',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>res.json(await db.driver.findMany({where:{organizationId:req.user!.organizationId,status:DriverStatus.AVAILABLE,licenseExpiry:{gt:new Date()}},orderBy:{name:'asc'}}))));
-app.get('/api/drivers/:id',allow(Role.FLEET_MANAGER,Role.SAFETY_OFFICER,Role.DISPATCHER),asyncRoute(async(req,res)=>{
-  const driver=await db.driver.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId},include:{user:{select:{email:true,isActive:true,lastLoginAt:true}},documents:{orderBy:{createdAt:'desc'}},trips:{include:{vehicle:true},orderBy:{createdAt:'desc'},take:10}}});
-  if(!driver)throw Object.assign(new Error('Driver not found'),{status:404});
-  const documents=await Promise.all(driver.documents.map(async document=>({...document,objectKey:undefined,url:objectStorageConfigured()?await signedObjectUrl(document.objectKey):null})));
-  res.json({...driver,documents});
-}));
-app.post('/api/drivers/:id/approve',allow(Role.FLEET_MANAGER,Role.SAFETY_OFFICER),asyncRoute(async(req,res)=>{
-  const driver=await db.driver.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId},include:{documents:true,user:true}});if(!driver)throw Object.assign(new Error('Driver not found'),{status:404});
-  if(!driver.userId)throw Object.assign(new Error('Only a linked driver account can use digital approval'),{status:409});
-  if(driver.onboardingStatus!==DriverOnboardingStatus.NEEDS_REVIEW)throw Object.assign(new Error('This driver has not submitted onboarding for review'),{status:409});
-  const uploaded=new Set(driver.documents.map(document=>document.type));if(!uploaded.has(DriverDocumentType.PROFILE_PHOTO)||!uploaded.has(DriverDocumentType.LICENSE_FRONT))throw Object.assign(new Error('Profile photo and licence front are required before approval'),{status:409});
-  if(driver.licenseNo.startsWith('PENDING-')||driver.licenseExpiry<=new Date())throw Object.assign(new Error('Confirm a valid, unexpired driving licence before approval'),{status:409});
-  res.json(await db.driver.update({where:{id:driver.id},data:{onboardingStatus:DriverOnboardingStatus.VERIFIED,status:DriverStatus.AVAILABLE,verifiedAt:new Date(),reviewedAt:new Date(),reviewedById:req.user!.id,reviewNote:null},include:{user:{select:{email:true,isActive:true,lastLoginAt:true}},documents:true}}));
-}));
-app.post('/api/drivers/:id/reject',allow(Role.FLEET_MANAGER,Role.SAFETY_OFFICER),asyncRoute(async(req,res)=>{
-  const {reviewNote}=parse(z.object({reviewNote:z.string().trim().min(10).max(500)}),req.body);const driver=await db.driver.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId,userId:{not:null}}});if(!driver)throw Object.assign(new Error('Linked driver not found'),{status:404});
-  if(driver.onboardingStatus!==DriverOnboardingStatus.NEEDS_REVIEW)throw Object.assign(new Error('Only a submitted onboarding can be rejected'),{status:409});
-  res.json(await db.driver.update({where:{id:driver.id},data:{onboardingStatus:DriverOnboardingStatus.REJECTED,status:DriverStatus.OFF_DUTY,verifiedAt:null,reviewedAt:new Date(),reviewedById:req.user!.id,reviewNote}}));
-}));
 app.post('/api/drivers',allow(Role.FLEET_MANAGER,Role.SAFETY_OFFICER),asyncRoute(async(req,res)=>res.status(201).json(await db.driver.create({data:{...parse(driverSchema,req.body),organizationId:req.user!.organizationId}}))));
 app.put('/api/drivers/:id',allow(Role.FLEET_MANAGER,Role.SAFETY_OFFICER),asyncRoute(async(req,res)=>{const row=await db.driver.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!row)throw Object.assign(new Error('Driver not found'),{status:404});res.json(await db.driver.update({where:{id:row.id},data:parse(driverSchema.partial(),req.body)}))}));
-app.delete('/api/drivers/:id',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const row=await db.driver.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!row)throw Object.assign(new Error('Driver not found'),{status:404});if(row.userId)throw Object.assign(new Error('A driver with login access cannot be deleted; suspend the linked account instead'),{status:409});await db.driver.delete({where:{id:row.id}});res.status(204).end();}));
+app.delete('/api/drivers/:id',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const row=await db.driver.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!row)throw Object.assign(new Error('Driver not found'),{status:404});await db.driver.delete({where:{id:row.id}});res.status(204).end();}));
 
-app.get('/api/driver/me',allow(Role.DRIVER),asyncRoute(async(req,res)=>{
-  if(!req.user!.driverId)throw Object.assign(new Error('Driver profile is not linked to this account'),{status:409});
-  const driver=await db.driver.findFirst({where:{id:req.user!.driverId,organizationId:req.user!.organizationId},include:{documents:{select:{id:true,type:true,createdAt:true,ocrConfidence:true}}}});if(!driver)throw Object.assign(new Error('Driver profile not found'),{status:404});res.json(driver);
-}));
-
-app.post('/api/driver/me/onboarding',allow(Role.DRIVER),upload.fields([{name:'profilePhoto',maxCount:1},{name:'licenseFront',maxCount:1},{name:'licenseBack',maxCount:1}]),asyncRoute(async(req,res)=>{
-  if(!req.user!.driverId)throw Object.assign(new Error('Driver profile is not linked to this account'),{status:409});
-  if(!objectStorageConfigured())throw Object.assign(new Error('Cloudflare R2 is not configured'),{status:503});
-  const files=req.files as Record<string,Express.Multer.File[]>|undefined;const profilePhoto=files?.profilePhoto?.[0],licenseFront=files?.licenseFront?.[0],licenseBack=files?.licenseBack?.[0];
-  if(!profilePhoto||!licenseFront)throw Object.assign(new Error('Profile photo and driving-licence front image are required'),{status:400});
-  const extraction=await extractDrivingLicense(licenseFront.buffer);
-  const uploads=await Promise.all([
-    uploadPrivateObject({organizationId:req.user!.organizationId,folder:`drivers/${req.user!.driverId}/profile`,originalName:profilePhoto.originalname,mimeType:profilePhoto.mimetype,buffer:profilePhoto.buffer}),
-    uploadPrivateObject({organizationId:req.user!.organizationId,folder:`drivers/${req.user!.driverId}/license`,originalName:licenseFront.originalname,mimeType:licenseFront.mimetype,buffer:licenseFront.buffer}),
-    licenseBack?uploadPrivateObject({organizationId:req.user!.organizationId,folder:`drivers/${req.user!.driverId}/license`,originalName:licenseBack.originalname,mimeType:licenseBack.mimetype,buffer:licenseBack.buffer}):Promise.resolve(null)
-  ]);
-  const records=[{type:DriverDocumentType.PROFILE_PHOTO,file:profilePhoto,key:uploads[0],extractedData:undefined,ocrConfidence:undefined},{type:DriverDocumentType.LICENSE_FRONT,file:licenseFront,key:uploads[1],extractedData:JSON.parse(JSON.stringify(extraction)),ocrConfidence:extraction.confidence},...(licenseBack&&uploads[2]?[{type:DriverDocumentType.LICENSE_BACK,file:licenseBack,key:uploads[2],extractedData:undefined,ocrConfidence:undefined}]:[])];
-  await db.$transaction(async tx=>{for(const record of records)await tx.driverDocument.upsert({where:{driverId_type:{driverId:req.user!.driverId!,type:record.type}},create:{organizationId:req.user!.organizationId,driverId:req.user!.driverId!,type:record.type,objectKey:record.key,mimeType:record.file.mimetype,originalName:record.file.originalname,extractedData:record.extractedData,ocrConfidence:record.ocrConfidence},update:{objectKey:record.key,mimeType:record.file.mimetype,originalName:record.file.originalname,extractedData:record.extractedData,ocrConfidence:record.ocrConfidence,createdAt:new Date()}});await tx.driver.update({where:{id:req.user!.driverId!},data:{onboardingStatus:DriverOnboardingStatus.NEEDS_REVIEW,status:DriverStatus.OFF_DUTY,reviewNote:null,reviewedAt:null,reviewedById:null}})});
-  res.json({onboardingStatus:DriverOnboardingStatus.NEEDS_REVIEW,extracted:{name:extraction.name,licenseNo:extraction.licenseNo,licenseCategory:extraction.licenseCategory,licenseExpiry:extraction.licenseExpiry,confidence:extraction.confidence}});
-}));
-
-app.post('/api/driver/me/onboarding/confirm',allow(Role.DRIVER),asyncRoute(async(req,res)=>{
-  if(!req.user!.driverId)throw Object.assign(new Error('Driver profile is not linked to this account'),{status:409});
-  const data=parse(z.object({name:z.string().trim().min(2).max(80),licenseNo:z.string().trim().min(5).max(30),licenseCategory:z.string().trim().min(2).max(20),licenseExpiry:z.coerce.date(),contact:z.string().trim().min(7).max(20).optional()}),req.body);if(data.licenseExpiry<=new Date())throw Object.assign(new Error('Driving licence is expired'),{status:400});
-  const requiredDocuments=await db.driverDocument.count({where:{driverId:req.user!.driverId,type:{in:[DriverDocumentType.PROFILE_PHOTO,DriverDocumentType.LICENSE_FRONT]}}});if(requiredDocuments<2)throw Object.assign(new Error('Upload the required onboarding photographs first'),{status:409});
-  const driver=await db.$transaction(async tx=>{await tx.user.update({where:{id:req.user!.id},data:{name:data.name}});return tx.driver.update({where:{id:req.user!.driverId!},data:{...data,onboardingStatus:DriverOnboardingStatus.NEEDS_REVIEW,status:DriverStatus.OFF_DUTY,verifiedAt:null,reviewedAt:null,reviewedById:null,reviewNote:null}})});res.json(driver);
-}));
-
-const placeSchema=z.object({id:z.string().min(2).max(180),name:z.string().trim().min(2).max(180),label:z.string().trim().min(2).max(300),city:z.string().max(120).optional(),state:z.string().max(120),latitude:z.number().min(6).max(38),longitude:z.number().min(68).max(98),provider:z.enum(['GOOGLE','PHOTON','BUILT_IN'])});
-const tripSchema=z.object({sourceLocation:placeSchema,destinationLocation:placeSchema,routeOptionId:z.enum(['SHORTEST','FASTEST','TOLL_SAVER']),vehicleId:z.string(),driverId:z.string(),cargoWeightKg:z.coerce.number().positive(),revenue:z.coerce.number().nonnegative().default(0)});
-async function getAssignmentContext(organizationId:string,vehicleId:string,driverId:string){const [vehicle,driver,vehicleTrip,driverTrip,maintenance]=await Promise.all([db.vehicle.findFirst({where:{id:vehicleId,organizationId}}),db.driver.findFirst({where:{id:driverId,organizationId}}),db.trip.findFirst({where:{organizationId,vehicleId,status:{in:[TripStatus.DISPATCHED,TripStatus.IN_PROGRESS]}},select:{tripNo:true}}),db.trip.findFirst({where:{organizationId,driverId,status:{in:[TripStatus.DISPATCHED,TripStatus.IN_PROGRESS]}},select:{tripNo:true}}),db.maintenance.findFirst({where:{organizationId,vehicleId,status:MaintenanceStatus.ACTIVE},select:{serviceType:true}})]);return {vehicle,driver,vehicleTripNo:vehicleTrip?.tripNo,driverTripNo:driverTrip?.tripNo,maintenanceService:maintenance?.serviceType}}
-app.post('/api/trips/validate-assignment',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const data=parse(tripSchema.pick({vehicleId:true,driverId:true,cargoWeightKg:true}),req.body),context=await getAssignmentContext(req.user!.organizationId,data.vehicleId,data.driverId);try{assertAssignmentEligible({...context,cargoWeightKg:data.cargoWeightKg});res.json({eligible:true,reasons:[]})}catch(error){if(error instanceof AssignmentEligibilityError)return res.json({eligible:false,reasons:error.reasons});throw error}}));
-app.get('/api/routing/places',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const query=parse(z.string().trim().min(2).max(120),String(req.query.q||''));res.json(await searchPlaces(query));
-}));
-app.post('/api/routing/estimate',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const {sourceLocation,destinationLocation,vehicleId}=parse(z.object({sourceLocation:placeSchema,destinationLocation:placeSchema,vehicleId:z.string().optional()}),req.body);
-  const vehicle=vehicleId?await db.vehicle.findFirst({where:{id:vehicleId,organizationId:req.user!.organizationId}}):null;
-  if(vehicleId&&!vehicle)throw Object.assign(new Error('Vehicle not found'),{status:404});
-  res.json(await estimateRoutes(sourceLocation,destinationLocation,vehicle?.type));
-}));
+const tripSchema=z.object({source:z.string().min(2),destination:z.string().min(2),vehicleId:z.string(),driverId:z.string(),cargoWeightKg:z.coerce.number().positive(),plannedDistanceKm:z.coerce.number().positive(),revenue:z.coerce.number().nonnegative().default(0),estimatedTollsInr:z.union([z.null(),z.coerce.number().nonnegative()]).optional().default(null),estimatedDurationMin:z.coerce.number().int().positive().optional(),routeSummary:z.string().max(300).optional(),routeProvider:z.enum(['GOOGLE','VALHALLA']).optional(),tollEstimateStatus:z.enum(['ESTIMATED','HISTORICAL_ESTIMATE','NO_TOLLS_EXPECTED','TOLLS_PRESENT_PRICE_UNKNOWN','UNAVAILABLE']).optional(),routeEstimatedAt:z.coerce.date().optional()});
 app.get('/api/trips',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>res.json(await db.trip.findMany({where:{organizationId:req.user!.organizationId},include:{vehicle:true,driver:true},orderBy:{createdAt:'desc'}}))));
-app.get('/api/trips/:id',allow(Role.DISPATCHER,Role.FLEET_MANAGER,Role.SAFETY_OFFICER),asyncRoute(async(req,res)=>{
-  const trip=await db.trip.findFirst({
-    where:{id:idParam(req),organizationId:req.user!.organizationId},
-    include:{
-      vehicle:true,
-      driver:{
-        include:{
-          user:{select:{email:true,isActive:true,lastLoginAt:true}},
-          documents:{orderBy:{createdAt:'desc'}},
-          _count:{select:{trips:true,documents:true}}
-        }
-      },
-      evidence:{orderBy:{createdAt:'desc'}},
-      fuelLogs:{include:{driver:{select:{id:true,name:true}},vehicle:{select:{id:true,name:true,registrationNo:true}}},orderBy:{date:'desc'}},
-      expenses:{include:{driver:{select:{id:true,name:true}},vehicle:{select:{id:true,name:true,registrationNo:true}}},orderBy:{date:'desc'}},
-      maintenance:{include:{driver:{select:{id:true,name:true}},vehicle:{select:{id:true,name:true,registrationNo:true}}},orderBy:{startDate:'desc'}},
-      fastagTransactions:{include:{expense:true,connection:true},orderBy:{occurredAt:'desc'}}
-    }
-  });
-  if(!trip)throw Object.assign(new Error('Trip not found'),{status:404});
-  const [documents,evidence,fuelLogs,expenses,maintenance]=await Promise.all([
-    Promise.all(trip.driver.documents.map(async document=>{const {objectKey,...safeDocument}=document;return {...safeDocument,url:objectStorageConfigured()?await signedObjectUrl(objectKey):null}})),
-    Promise.all(trip.evidence.map(async item=>{const {objectKey,...safeItem}=item;return {...safeItem,url:await signedPrivateUrl(objectKey)}})),
-    Promise.all(trip.fuelLogs.map(async item=>{const {receiptObjectKey,...safeItem}=item;return {...safeItem,receiptUrl:await signedPrivateUrl(receiptObjectKey)}})),
-    Promise.all(trip.expenses.map(async item=>{const {receiptObjectKey,...safeItem}=item;return {...safeItem,receiptUrl:await signedPrivateUrl(receiptObjectKey)}})),
-    Promise.all(trip.maintenance.map(async item=>{const {objectKey,...safeItem}=item;return {...safeItem,photoUrl:await signedPrivateUrl(objectKey)}}))
-  ]);
-  const fastagTransactions=trip.fastagTransactions.map(({rawPayload,...transaction})=>transaction);
-  const actualToll=expenses.filter(item=>item.type===ExpenseType.TOLL&&item.source===RecordSource.FASTAG).reduce((sum,item)=>sum+item.amount,0);res.json({...trip,fastagTransactions,driver:{...trip.driver,documents},evidence,fuelLogs,expenses,maintenance,costSummary:{fuel:fuelLogs.reduce((sum,item)=>sum+item.cost,0),expenses:expenses.reduce((sum,item)=>sum+item.amount,0),maintenance:maintenance.reduce((sum,item)=>sum+item.cost,0),actualToll,tollVariance:actualToll-trip.estimatedToll}});
+
+const placeSchema=z.object({id:z.string().min(1),name:z.string().min(1),label:z.string().min(1),city:z.string().optional(),state:z.string(),latitude:z.number().finite().min(-90).max(90),longitude:z.number().finite().min(-180).max(180),provider:z.enum(['GOOGLE','PHOTON','BUILT_IN'])});
+app.get('/api/places/search',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>res.json(await searchPlaces(String(req.query.q||'')))));
+app.post('/api/routes/estimate',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
+  const {source,destination,vehicleId}=parse(z.object({source:placeSchema,destination:placeSchema,vehicleId:z.string().min(1)}),req.body);
+  const organizationId=req.user!.organizationId;
+  const vehicle=await db.vehicle.findFirst({where:{id:vehicleId,organizationId},select:{id:true,type:true,capacityKg:true}});
+  if(!vehicle)throw Object.assign(new Error('Vehicle not found'),{status:404});
+  const routes=await estimateRoutes(source as Place,destination as Place);
+  if(routes.options.some(option=>option.estimatedToll===null)){
+    const [historyTrips,tollExpenses]=await Promise.all([
+      db.trip.findMany({where:{organizationId,status:{in:[TripStatus.COMPLETED,TripStatus.DISPATCHED]}},select:{id:true,vehicleId:true,source:true,destination:true,plannedDistanceKm:true,createdAt:true,dispatchedAt:true,completedAt:true,estimatedTollsInr:true,vehicle:{select:{type:true,capacityKg:true}}},orderBy:{createdAt:'desc'},take:100}),
+      db.expense.findMany({where:{organizationId,type:'TOLL'},select:{vehicleId:true,amount:true,date:true},orderBy:{date:'desc'},take:250})
+    ]);
+    const observations=buildHistoricalTollObservations(historyTrips.map(trip=>({id:trip.id,vehicleId:trip.vehicleId,vehicleType:trip.vehicle.type,vehicleCapacityKg:trip.vehicle.capacityKg,source:trip.source,destination:trip.destination,distanceKm:trip.plannedDistanceKm,createdAt:trip.createdAt,dispatchedAt:trip.dispatchedAt,completedAt:trip.completedAt,providerEstimatedTollInr:trip.estimatedTollsInr})),tollExpenses.map(expense=>({vehicleId:expense.vehicleId,amountInr:expense.amount,date:expense.date})));
+    const vehicleClass=resolveTollVehicleClass(vehicle.type,vehicle.capacityKg);
+    routes.options=routes.options.map(option=>{
+      if(option.estimatedToll!==null)return option;
+      const estimate=estimateHistoricalToll({source:source as Place,destination:destination as Place,distanceKm:option.distanceKm,vehicleClass,observations});
+      return estimate?{...option,estimatedToll:estimate.estimatedTollInr,tollEstimateStatus:'HISTORICAL_ESTIMATE' as const,tollEstimateSource:estimate.source,tollConfidence:estimate.confidence,tollSampleSize:estimate.sampleSize,tollEstimatedAt:estimate.asOf}:option;
+    });
+  }
+  res.json(routes);
 }));
+
+const profitabilityPreviewSchema=z.object({vehicleId:z.string().min(1),plannedDistanceKm:z.coerce.number().positive(),revenue:z.coerce.number().nonnegative(),estimatedTollsInr:z.union([z.null(),z.coerce.number().nonnegative()]).default(null)});
+async function estimateTripProfitability(organizationId:string,data:z.infer<typeof profitabilityPreviewSchema>){
+  const vehicle=await db.vehicle.findFirst({where:{id:data.vehicleId,organizationId},select:{id:true,type:true,acquisitionCost:true}});
+  if(!vehicle)throw Object.assign(new Error('Vehicle not found'),{status:404});
+  const [maintenance,distance,recentFuelLogs,completedFuelTrips]=await Promise.all([
+    db.maintenance.aggregate({where:{organizationId,vehicleId:vehicle.id,status:MaintenanceStatus.CLOSED},_sum:{cost:true}}),
+    db.trip.aggregate({where:{organizationId,vehicleId:vehicle.id,status:TripStatus.COMPLETED},_sum:{plannedDistanceKm:true}}),
+    db.fuelLog.findMany({where:{organizationId,vehicleId:vehicle.id,liters:{gt:0},cost:{gt:0}},select:{liters:true,cost:true,date:true},orderBy:{date:'desc'},take:5}),
+    db.trip.findMany({where:{organizationId,vehicleId:vehicle.id,status:TripStatus.COMPLETED,fuelConsumedL:{gt:0}},select:{plannedDistanceKm:true,fuelConsumedL:true},orderBy:{completedAt:'desc'},take:10})
+  ]);
+  const fuelPrediction=buildFuelPrediction(recentFuelLogs,completedFuelTrips.map(trip=>({distanceKm:trip.plannedDistanceKm,fuelConsumedL:trip.fuelConsumedL!})));
+  return calculateTripProfitability({
+    revenueInr:data.revenue,
+    plannedDistanceKm:data.plannedDistanceKm,
+    estimatedTollsInr:data.estimatedTollsInr,
+    vehicleType:vehicle.type,
+    vehicleAcquisitionCostInr:vehicle.acquisitionCost,
+    historicalMaintenanceCostInr:maintenance._sum.cost||0,
+    historicalCompletedDistanceKm:distance._sum.plannedDistanceKm||0,
+    fuelPrediction,
+    config:tripProfitabilityConfig
+  });
+}
+app.post('/api/trips/profitability-estimate',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
+  const data=parse(profitabilityPreviewSchema,req.body);
+  res.json(await estimateTripProfitability(req.user!.organizationId,data));
+}));
+app.get('/api/trips/:id/profitability-estimate',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
+  const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});
+  if(!trip)throw Object.assign(new Error('Trip not found'),{status:404});
+  if(trip.status!==TripStatus.DRAFT)throw Object.assign(new Error('Profitability is reviewed before a draft is dispatched'),{status:409});
+  res.json(await estimateTripProfitability(req.user!.organizationId,{vehicleId:trip.vehicleId,plannedDistanceKm:trip.plannedDistanceKm,revenue:trip.revenue,estimatedTollsInr:trip.estimatedTollsInr}));
+}));
+
+async function getAssignmentContext(organizationId:string,vehicleId:string,driverId:string){
+  const [vehicle,driver,vehicleTrip,driverTrip,maintenance]=await Promise.all([
+    db.vehicle.findFirst({where:{id:vehicleId,organizationId}}),
+    db.driver.findFirst({where:{id:driverId,organizationId}}),
+    db.trip.findFirst({where:{organizationId,vehicleId,status:TripStatus.DISPATCHED},select:{tripNo:true}}),
+    db.trip.findFirst({where:{organizationId,driverId,status:TripStatus.DISPATCHED},select:{tripNo:true}}),
+    db.maintenance.findFirst({where:{organizationId,vehicleId,status:MaintenanceStatus.ACTIVE},select:{serviceType:true}})
+  ]);
+  return {vehicle,driver,vehicleTripNo:vehicleTrip?.tripNo,driverTripNo:driverTrip?.tripNo,maintenanceService:maintenance?.serviceType};
+}
+
+app.post('/api/trips/validate-assignment',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
+  const data=parse(tripSchema.pick({vehicleId:true,driverId:true,cargoWeightKg:true}),req.body);
+  const context=await getAssignmentContext(req.user!.organizationId,data.vehicleId,data.driverId);
+  try { assertAssignmentEligible({...context,cargoWeightKg:data.cargoWeightKg}); res.json({eligible:true,reasons:[]}); }
+  catch(error) { if(error instanceof AssignmentEligibilityError)return res.json({eligible:false,reasons:error.reasons}); throw error; }
+}));
+
 app.post('/api/trips',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const data=parse(tripSchema,req.body),context=await getAssignmentContext(req.user!.organizationId,data.vehicleId,data.driverId);assertAssignmentEligible({...context,cargoWeightKg:data.cargoWeightKg});const v=context.vehicle!,d=context.driver!;
-  if(d.userId&&d.onboardingStatus!==DriverOnboardingStatus.VERIFIED)throw Object.assign(new Error('Driver onboarding must be verified before assignment'),{status:409});
-  const estimate=await estimateRoutes(data.sourceLocation,data.destinationLocation,v.type);const selectedRoute=estimate.options.find(option=>option.id===data.routeOptionId);
-  if(!selectedRoute)throw Object.assign(new Error('Selected route option is no longer available'),{status:409});
+  const data=parse(tripSchema,req.body);
+  const context=await getAssignmentContext(req.user!.organizationId,data.vehicleId,data.driverId);
+  assertAssignmentEligible({...context,cargoWeightKg:data.cargoWeightKg});
   const tripNo=`TRP${String((await db.trip.count({where:{organizationId:req.user!.organizationId}}))+1).padStart(4,'0')}`;
-  res.status(201).json(await db.trip.create({data:{source:estimate.source.label,destination:estimate.destination.label,sourceCityId:data.sourceLocation.id,destinationCityId:data.destinationLocation.id,sourceLatitude:data.sourceLocation.latitude,sourceLongitude:data.sourceLocation.longitude,destinationLatitude:data.destinationLocation.latitude,destinationLongitude:data.destinationLocation.longitude,vehicleId:data.vehicleId,driverId:data.driverId,cargoWeightKg:data.cargoWeightKg,revenue:data.revenue,plannedDistanceKm:selectedRoute.distanceKm,estimatedDurationMinutes:selectedRoute.durationMinutes,estimatedToll:selectedRoute.estimatedToll,routeStrategy:selectedRoute.strategy,routeLabel:selectedRoute.label,routeVia:selectedRoute.via,routeProvider:selectedRoute.provider,routePolyline:selectedRoute.polyline,tripNo,organizationId:req.user!.organizationId},include:{vehicle:true,driver:true}}));
+  res.status(201).json(await db.trip.create({data:{...data,tripNo,organizationId:req.user!.organizationId},include:{vehicle:true,driver:true}}));
 }));
 app.post('/api/trips/:id/dispatch',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId},include:{vehicle:true,driver:true}}); if(!trip) throw Object.assign(new Error('Trip not found'),{status:404});
-  const context=await getAssignmentContext(req.user!.organizationId,trip.vehicleId,trip.driverId);assertAssignmentEligible({...context,cargoWeightKg:trip.cargoWeightKg,tripStatus:trip.status});if(trip.driver.userId&&trip.driver.onboardingStatus!==DriverOnboardingStatus.VERIFIED)throw Object.assign(new Error('Driver onboarding must be verified before dispatch'),{status:409});
-  const result=await db.$transaction(async tx=>{const vehicle=await tx.vehicle.updateMany({where:{id:trip.vehicleId,organizationId:req.user!.organizationId,status:VehicleStatus.AVAILABLE},data:{status:VehicleStatus.ON_TRIP}}),driver=await tx.driver.updateMany({where:{id:trip.driverId,organizationId:req.user!.organizationId,status:DriverStatus.AVAILABLE,licenseExpiry:{gt:new Date()}},data:{status:DriverStatus.ON_TRIP}});if(vehicle.count!==1||driver.count!==1)throw new AssignmentEligibilityError([{code:vehicle.count!==1?'VEHICLE_ON_TRIP':'DRIVER_ON_TRIP',field:vehicle.count!==1?'vehicleId':'driverId',message:'Assignment availability changed while dispatching. Refresh and try again.'}]);return tx.trip.update({where:{id:trip.id},data:{status:TripStatus.DISPATCHED,dispatchedAt:new Date()},include:{vehicle:true,driver:true}})},{isolationLevel:Prisma.TransactionIsolationLevel.Serializable}); res.json(result);
+  const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}}); if(!trip) throw Object.assign(new Error('Trip not found'),{status:404});
+  const context=await getAssignmentContext(req.user!.organizationId,trip.vehicleId,trip.driverId);
+  assertAssignmentEligible({...context,cargoWeightKg:trip.cargoWeightKg,tripStatus:trip.status});
+  const result=await db.$transaction(async tx=>{
+    const vehicle=await tx.vehicle.updateMany({where:{id:trip.vehicleId,organizationId:req.user!.organizationId,status:VehicleStatus.AVAILABLE},data:{status:VehicleStatus.ON_TRIP}});
+    const driver=await tx.driver.updateMany({where:{id:trip.driverId,organizationId:req.user!.organizationId,status:DriverStatus.AVAILABLE,licenseExpiry:{gt:new Date()}},data:{status:DriverStatus.ON_TRIP}});
+    if(vehicle.count!==1||driver.count!==1)throw new AssignmentEligibilityError([{code:vehicle.count!==1?'VEHICLE_ON_TRIP':'DRIVER_ON_TRIP',field:vehicle.count!==1?'vehicleId':'driverId',message:'Assignment availability changed while dispatching. Review the latest vehicle and driver status, then try again.'}]);
+    return tx.trip.update({where:{id:trip.id},data:{status:TripStatus.DISPATCHED,dispatchedAt:new Date()},include:{vehicle:true,driver:true}})
+  },{isolationLevel:Prisma.TransactionIsolationLevel.Serializable}); res.json(result);
 }));
 app.post('/api/trips/:id/complete',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const {finalOdometerKm,fuelConsumedL}=parse(z.object({finalOdometerKm:z.coerce.number().positive(),fuelConsumedL:z.coerce.number().positive()}),req.body); const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}}); if(!trip||(trip.status!==TripStatus.DISPATCHED&&trip.status!==TripStatus.IN_PROGRESS)) throw Object.assign(new Error('Only dispatched or active trips can be completed'),{status:409});
-  const result=await db.$transaction(async tx=>{const reported=await tx.maintenance.count({where:{vehicleId:trip.vehicleId,status:MaintenanceStatus.REPORTED}});await tx.vehicle.update({where:{id:trip.vehicleId},data:{status:reported?VehicleStatus.IN_SHOP:VehicleStatus.AVAILABLE,odometerKm:finalOdometerKm}});if(reported)await tx.maintenance.updateMany({where:{vehicleId:trip.vehicleId,status:MaintenanceStatus.REPORTED},data:{status:MaintenanceStatus.ACTIVE}});await tx.driver.update({where:{id:trip.driverId},data:{status:DriverStatus.AVAILABLE}});return tx.trip.update({where:{id:trip.id},data:{status:TripStatus.COMPLETED,completedAt:new Date(),finalOdometerKm,fuelConsumedL},include:{vehicle:true,driver:true,maintenance:true}})});res.json(result);
+  const {finalOdometerKm,fuelConsumedL}=parse(z.object({finalOdometerKm:z.coerce.number().positive(),fuelConsumedL:z.coerce.number().positive()}),req.body); const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}}); if(!trip||trip.status!==TripStatus.DISPATCHED) throw Object.assign(new Error('Only dispatched trips can be completed'),{status:409});
+  const result=await db.$transaction(async tx=>{await tx.vehicle.update({where:{id:trip.vehicleId},data:{status:VehicleStatus.AVAILABLE,odometerKm:finalOdometerKm}});await tx.driver.update({where:{id:trip.driverId},data:{status:DriverStatus.AVAILABLE}});return tx.trip.update({where:{id:trip.id},data:{status:TripStatus.COMPLETED,completedAt:new Date(),finalOdometerKm,fuelConsumedL},include:{vehicle:true,driver:true}})});res.json(result);
 }));
 app.post('/api/trips/:id/cancel',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!trip||(trip.status!==TripStatus.DRAFT&&trip.status!==TripStatus.DISPATCHED))throw Object.assign(new Error('Trip cannot be cancelled'),{status:409});const wasLive=trip.status===TripStatus.DISPATCHED;const result=await db.$transaction(async tx=>{if(wasLive){await tx.vehicle.update({where:{id:trip.vehicleId},data:{status:VehicleStatus.AVAILABLE}});await tx.driver.update({where:{id:trip.driverId},data:{status:DriverStatus.AVAILABLE}})}return tx.trip.update({where:{id:trip.id},data:{status:TripStatus.CANCELLED},include:{vehicle:true,driver:true}})});res.json(result);}));
 
-app.get('/api/driver/me/trips',allow(Role.DRIVER),asyncRoute(async(req,res)=>{if(!req.user!.driverId)throw Object.assign(new Error('Driver profile is not linked to this account'),{status:409});res.json(await db.trip.findMany({where:{organizationId:req.user!.organizationId,driverId:req.user!.driverId,status:{in:[TripStatus.DISPATCHED,TripStatus.IN_PROGRESS,TripStatus.COMPLETED]}},include:{vehicle:true},orderBy:{createdAt:'desc'}}));}));
-app.get('/api/driver/me/trips/:id',allow(Role.DRIVER),asyncRoute(async(req,res)=>{
-  if(!req.user!.driverId)throw Object.assign(new Error('Driver profile is not linked to this account'),{status:409});
-  const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId,driverId:req.user!.driverId},include:{vehicle:{include:{maintenance:{where:{status:{in:[MaintenanceStatus.REPORTED,MaintenanceStatus.ACTIVE]}},orderBy:{startDate:'desc'},take:10},fastagConnection:true}},evidence:{orderBy:{createdAt:'desc'}},fuelLogs:{orderBy:{date:'desc'}},expenses:{orderBy:{date:'desc'}},maintenance:{orderBy:{startDate:'desc'}},fastagTransactions:{orderBy:{occurredAt:'desc'}}}});if(!trip)throw Object.assign(new Error('Assigned trip not found'),{status:404});
-  const [evidence,fuelLogs,expenses,maintenance,vehicleMaintenance]=await Promise.all([
-    Promise.all(trip.evidence.map(async item=>{const {objectKey,...safe}=item;return {...safe,url:await signedPrivateUrl(objectKey)}})),
-    Promise.all(trip.fuelLogs.map(async item=>{const {receiptObjectKey,...safe}=item;return {...safe,receiptUrl:await signedPrivateUrl(receiptObjectKey)}})),
-    Promise.all(trip.expenses.map(async item=>{const {receiptObjectKey,...safe}=item;return {...safe,receiptUrl:await signedPrivateUrl(receiptObjectKey)}})),
-    Promise.all(trip.maintenance.map(async item=>{const {objectKey,...safe}=item;return {...safe,photoUrl:await signedPrivateUrl(objectKey)}})),
-    Promise.all(trip.vehicle.maintenance.map(async item=>{const {objectKey,...safe}=item;return {...safe,photoUrl:await signedPrivateUrl(objectKey)}}))
-  ]);
-  const fastagTransactions=trip.fastagTransactions.map(({rawPayload,...transaction})=>transaction);
-  const actualToll=expenses.filter(item=>item.type===ExpenseType.TOLL&&item.source===RecordSource.FASTAG).reduce((sum,item)=>sum+item.amount,0);
-  res.json({...trip,fastagTransactions,vehicle:{...trip.vehicle,maintenance:vehicleMaintenance},evidence,fuelLogs,expenses,maintenance,costSummary:{fuel:fuelLogs.reduce((sum,item)=>sum+item.cost,0),expenses:expenses.reduce((sum,item)=>sum+item.amount,0),maintenance:maintenance.reduce((sum,item)=>sum+item.cost,0),actualToll,tollVariance:actualToll-trip.estimatedToll}});
-}));
-app.post('/api/driver/me/trips/:id/start',allow(Role.DRIVER),upload.single('odometerPhoto'),asyncRoute(async(req,res)=>{
-  if(!req.user!.driverId)throw Object.assign(new Error('Driver profile is not linked to this account'),{status:409});
-  const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId,driverId:req.user!.driverId},include:{vehicle:true,driver:true,evidence:true}});if(!trip)throw Object.assign(new Error('Assigned trip not found'),{status:404});
-  if(trip.status===TripStatus.IN_PROGRESS)return res.json(trip);
-  if(trip.status!==TripStatus.DISPATCHED)throw Object.assign(new Error('Only a dispatched trip can be started'),{status:409});if(trip.driver.onboardingStatus!==DriverOnboardingStatus.VERIFIED)throw Object.assign(new Error('Complete driver verification before starting a trip'),{status:409});
-  const {vehicleRegistrationNo,confirmedOdometerKm}=parse(z.object({vehicleRegistrationNo:z.string().min(4),confirmedOdometerKm:z.coerce.number().nonnegative().optional()}),req.body);if(normalizeRegistration(vehicleRegistrationNo)!==normalizeRegistration(trip.vehicle.registrationNo))throw Object.assign(new Error('Vehicle registration does not match the assigned vehicle'),{status:409});if(!req.file)throw Object.assign(new Error('An odometer photograph is required'),{status:400});
-  const ocr=await extractOdometer(req.file.buffer).catch(()=>({odometerKm:undefined,rawText:'',confidence:0}));const odometerKm=ocr.odometerKm??confirmedOdometerKm;if(odometerKm===undefined)throw Object.assign(new Error('Odometer could not be read. Confirm the reading and try again.'),{status:422});if(odometerKm<trip.vehicle.odometerKm)throw Object.assign(new Error(`Odometer reading cannot be below ${trip.vehicle.odometerKm} km`),{status:400});
-  const objectKey=await uploadPrivateObject({organizationId:req.user!.organizationId,folder:`trips/${trip.id}/evidence`,originalName:req.file.originalname,mimeType:req.file.mimetype,buffer:req.file.buffer});
-  const result=await db.$transaction(async tx=>{await tx.tripEvidence.create({data:{organizationId:req.user!.organizationId,tripId:trip.id,driverId:req.user!.driverId!,vehicleId:trip.vehicleId,type:TripEvidenceType.ODOMETER_START,objectKey,mimeType:req.file!.mimetype,originalName:req.file!.originalname,extractedOdometerKm:odometerKm,ocrConfidence:ocr.confidence,registrationNo:trip.vehicle.registrationNo}});return tx.trip.update({where:{id:trip.id},data:{status:TripStatus.IN_PROGRESS,startedAt:new Date(),startOdometerKm:odometerKm},include:{vehicle:true,driver:true,evidence:true}})});res.json(result);
-}));
-app.post('/api/driver/me/trips/:id/updates',allow(Role.DRIVER),upload.single('photo'),asyncRoute(async(req,res)=>{
-  if(!req.user!.driverId)throw Object.assign(new Error('Driver profile is not linked to this account'),{status:409});
-  const data=parse(z.object({note:z.string().trim().min(2).max(500),latitude:z.coerce.number().min(-90).max(90).optional(),longitude:z.coerce.number().min(-180).max(180).optional(),clientRequestId:z.string().trim().min(8).max(100)}),req.body);
-  const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId,driverId:req.user!.driverId}});if(!trip)throw Object.assign(new Error('Assigned trip not found'),{status:404});if(trip.status!==TripStatus.IN_PROGRESS)throw Object.assign(new Error('On-site updates are allowed only during an active trip'),{status:409});
-  const existing=await db.tripEvidence.findUnique({where:{clientRequestId:data.clientRequestId}});if(existing){if(existing.organizationId!==req.user!.organizationId||existing.driverId!==req.user!.driverId)throw Object.assign(new Error('Invalid idempotency key'),{status:409});return res.json(existing)}
-  const objectKey=req.file?await uploadPrivateObject({organizationId:req.user!.organizationId,folder:`trips/${trip.id}/updates`,originalName:req.file.originalname,mimeType:req.file.mimetype,buffer:req.file.buffer}):undefined;
-  res.status(201).json(await db.tripEvidence.create({data:{organizationId:req.user!.organizationId,tripId:trip.id,driverId:req.user!.driverId,vehicleId:trip.vehicleId,type:TripEvidenceType.SITE_UPDATE,note:data.note,latitude:data.latitude,longitude:data.longitude,clientRequestId:data.clientRequestId,objectKey,mimeType:req.file?.mimetype,originalName:req.file?.originalname}}));
-}));
-app.post('/api/driver/me/trips/:id/fuel',allow(Role.DRIVER),upload.single('fuelPhoto'),asyncRoute(async(req,res)=>{
-  if(!req.user!.driverId)throw Object.assign(new Error('Driver profile is not linked to this account'),{status:409});
-  const data=parse(z.object({liters:optionalPositiveNumber,confirmedLiters:optionalPositiveNumber,amount:optionalPositiveNumber,confirmedAmount:optionalPositiveNumber,odometerKm:z.coerce.number().nonnegative(),fuelStation:z.string().trim().max(120).optional(),clientRequestId:z.string().trim().min(8).max(100)}),req.body);if(!req.file)throw Object.assign(new Error('A fuel pump or receipt photograph is required'),{status:400});
-  const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId,driverId:req.user!.driverId},include:{vehicle:true}});if(!trip)throw Object.assign(new Error('Assigned trip not found'),{status:404});if(trip.status!==TripStatus.IN_PROGRESS)throw Object.assign(new Error('Fuel can be logged only during an active trip'),{status:409});if(data.odometerKm<trip.vehicle.odometerKm)throw Object.assign(new Error(`Odometer reading cannot be below ${trip.vehicle.odometerKm} km`),{status:400});
-  const existing=await db.fuelLog.findUnique({where:{clientRequestId:data.clientRequestId}});if(existing){if(existing.organizationId!==req.user!.organizationId||existing.driverId!==req.user!.driverId)throw Object.assign(new Error('Invalid idempotency key'),{status:409});return res.json({...existing,alreadyProcessed:true})}
-  const ocr=await extractReceipt(req.file.buffer).catch(()=>({amount:undefined,liters:undefined,vendor:undefined,date:undefined,rawText:'',confidence:0}));const liters=data.confirmedLiters??data.liters??ocr.liters;const amount=data.confirmedAmount??data.amount??ocr.amount;if(liters===undefined||amount===undefined)throw Object.assign(new Error('Fuel receipt OCR needs confirmation. Submit confirmed liters and amount.'),{status:422});if(liters>2000)throw Object.assign(new Error('Fuel volume is outside the supported range'),{status:400});
-  const objectKey=await uploadPrivateObject({organizationId:req.user!.organizationId,folder:`trips/${trip.id}/fuel`,originalName:req.file.originalname,mimeType:req.file.mimetype,buffer:req.file.buffer});
-  const extractedData=JSON.parse(JSON.stringify(ocr));const result=await db.$transaction(async tx=>{const fuelLog=await tx.fuelLog.create({data:{organizationId:req.user!.organizationId,vehicleId:trip.vehicleId,tripId:trip.id,driverId:req.user!.driverId!,liters,cost:amount,odometerKm:data.odometerKm,fuelStation:data.fuelStation||ocr.vendor,source:RecordSource.DRIVER_MOBILE,receiptObjectKey:objectKey,receiptMimeType:req.file!.mimetype,receiptName:req.file!.originalname,ocrConfidence:ocr.confidence,extractedData,clientRequestId:data.clientRequestId},include:{vehicle:true,driver:true,trip:true}});const evidence=await tx.tripEvidence.create({data:{organizationId:req.user!.organizationId,tripId:trip.id,driverId:req.user!.driverId!,vehicleId:trip.vehicleId,type:TripEvidenceType.FUEL_RECEIPT,objectKey,mimeType:req.file!.mimetype,originalName:req.file!.originalname,extractedOdometerKm:data.odometerKm,ocrConfidence:ocr.confidence,fuelLiters:liters,amount,fuelStation:data.fuelStation||ocr.vendor,clientRequestId:data.clientRequestId,note:(data.fuelStation||ocr.vendor)?`Fuel at ${data.fuelStation||ocr.vendor}`:'Fuel entry'}});return {fuelLog:{...fuelLog,receiptObjectKey:undefined,receiptUrl:await signedPrivateUrl(objectKey)},evidence:{...evidence,objectKey:undefined,url:await signedPrivateUrl(objectKey)},extracted:{amount:ocr.amount,liters:ocr.liters,vendor:ocr.vendor,confidence:ocr.confidence}}});res.status(201).json(result);
-}));
-app.post('/api/driver/me/trips/:id/expenses',allow(Role.DRIVER),upload.single('receiptPhoto'),asyncRoute(async(req,res)=>{
-  if(!req.user!.driverId)throw Object.assign(new Error('Driver profile is not linked to this account'),{status:409});
-  const data=parse(z.object({type:z.enum(ExpenseType),amount:optionalPositiveNumber,confirmedAmount:optionalPositiveNumber,vendor:z.string().trim().max(120).optional(),description:z.string().trim().max(300).optional(),clientRequestId:z.string().trim().min(8).max(100)}),req.body);if(!req.file)throw Object.assign(new Error('An expense receipt photograph is required'),{status:400});
-  const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId,driverId:req.user!.driverId}});if(!trip)throw Object.assign(new Error('Assigned trip not found'),{status:404});if(trip.status!==TripStatus.IN_PROGRESS)throw Object.assign(new Error('Expenses can be logged only during an active trip'),{status:409});
-  if(data.type===ExpenseType.TOLL&&await db.fastagConnection.findFirst({where:{vehicleId:trip.vehicleId,status:FastagConnectionStatus.ACTIVE}}))throw Object.assign(new Error('Toll receipts are disabled for this vehicle because FASTag expenses synchronize automatically.'),{status:409});
-  const existing=await db.expense.findUnique({where:{clientRequestId:data.clientRequestId}});if(existing){if(existing.organizationId!==req.user!.organizationId||existing.driverId!==req.user!.driverId)throw Object.assign(new Error('Invalid idempotency key'),{status:409});return res.json({...existing,alreadyProcessed:true})}
-  const ocr=await extractReceipt(req.file.buffer).catch(()=>({amount:undefined,liters:undefined,vendor:undefined,date:undefined,rawText:'',confidence:0}));const amount=data.confirmedAmount??data.amount??ocr.amount;if(amount===undefined)throw Object.assign(new Error('Receipt OCR could not confirm the total. Submit confirmedAmount after driver review.'),{status:422});
-  const objectKey=await uploadPrivateObject({organizationId:req.user!.organizationId,folder:`trips/${trip.id}/expenses`,originalName:req.file.originalname,mimeType:req.file.mimetype,buffer:req.file.buffer});const vendor=data.vendor||ocr.vendor;
-  const extractedData=JSON.parse(JSON.stringify(ocr));const result=await db.$transaction(async tx=>{const expense=await tx.expense.create({data:{organizationId:req.user!.organizationId,vehicleId:trip.vehicleId,tripId:trip.id,driverId:req.user!.driverId!,type:data.type,amount,vendor,description:data.description,source:RecordSource.DRIVER_MOBILE,receiptObjectKey:objectKey,receiptMimeType:req.file!.mimetype,receiptName:req.file!.originalname,ocrConfidence:ocr.confidence,extractedData,clientRequestId:data.clientRequestId},include:{vehicle:true,driver:true,trip:true}});const evidence=await tx.tripEvidence.create({data:{organizationId:req.user!.organizationId,tripId:trip.id,driverId:req.user!.driverId!,vehicleId:trip.vehicleId,type:TripEvidenceType.EXPENSE_RECEIPT,objectKey,mimeType:req.file!.mimetype,originalName:req.file!.originalname,ocrConfidence:ocr.confidence,amount,clientRequestId:data.clientRequestId,note:`${data.type}${vendor?` · ${vendor}`:''}${data.description?` · ${data.description}`:''}`}});return {expense,evidence}});res.status(201).json({expense:{...result.expense,receiptObjectKey:undefined,receiptUrl:await signedPrivateUrl(objectKey)},evidence:{...result.evidence,objectKey:undefined,url:await signedPrivateUrl(objectKey)},extracted:{amount:ocr.amount,vendor:ocr.vendor,date:ocr.date,confidence:ocr.confidence}});
-}));
-app.post('/api/driver/me/trips/:id/maintenance',allow(Role.DRIVER),upload.single('photo'),asyncRoute(async(req,res)=>{
-  if(!req.user!.driverId)throw Object.assign(new Error('Driver profile is not linked to this account'),{status:409});
-  const data=parse(z.object({serviceType:z.string().trim().min(2).max(100),description:z.string().trim().min(5).max(500),severity:z.enum(['LOW','MEDIUM','HIGH','CRITICAL']),odometerKm:optionalNonnegativeNumber,clientRequestId:z.string().trim().min(8).max(100)}),req.body);
-  const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId,driverId:req.user!.driverId},include:{vehicle:true}});if(!trip)throw Object.assign(new Error('Assigned trip not found'),{status:404});if(trip.status!==TripStatus.DISPATCHED&&trip.status!==TripStatus.IN_PROGRESS)throw Object.assign(new Error('Maintenance can be reported only for a dispatched or active trip'),{status:409});
-  const existing=await db.maintenance.findUnique({where:{clientRequestId:data.clientRequestId}});if(existing){if(existing.organizationId!==req.user!.organizationId||existing.driverId!==req.user!.driverId)throw Object.assign(new Error('Invalid idempotency key'),{status:409});return res.json({...existing,alreadyProcessed:true})}
-  const objectKey=req.file?await uploadPrivateObject({organizationId:req.user!.organizationId,folder:`trips/${trip.id}/maintenance`,originalName:req.file.originalname,mimeType:req.file.mimetype,buffer:req.file.buffer}):undefined;
-  const report=await db.maintenance.create({data:{organizationId:req.user!.organizationId,vehicleId:trip.vehicleId,tripId:trip.id,driverId:req.user!.driverId,serviceType:data.serviceType,description:data.description,severity:data.severity,reportedOdometerKm:data.odometerKm,source:RecordSource.DRIVER_MOBILE,status:MaintenanceStatus.REPORTED,objectKey,mimeType:req.file?.mimetype,originalName:req.file?.originalname,clientRequestId:data.clientRequestId},include:{vehicle:true,driver:true,trip:true}});res.status(201).json({...report,objectKey:undefined,photoUrl:await signedPrivateUrl(objectKey)});
-}));
-
 const maintenanceSchema=z.object({vehicleId:z.string(),serviceType:z.string().min(2),description:z.string().optional(),cost:z.coerce.number().nonnegative()});
-app.get('/api/maintenance',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const rows=await db.maintenance.findMany({where:{organizationId:req.user!.organizationId},include:{vehicle:true,driver:{select:{id:true,name:true}},trip:{select:{id:true,tripNo:true,source:true,destination:true}}},orderBy:{startDate:'desc'}});
-  const safeRows=await Promise.all(rows.map(async row=>{const {objectKey,...safe}=row;return {...safe,photoUrl:await signedPrivateUrl(objectKey)}}));
-  res.json(safeRows);
-}));
-app.post('/api/maintenance',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const data=parse(maintenanceSchema,req.body);const v=await db.vehicle.findFirst({where:{id:data.vehicleId,organizationId:req.user!.organizationId}});if(!v||v.status!==VehicleStatus.AVAILABLE)throw Object.assign(new Error('Only available vehicles can enter maintenance'),{status:409});const result=await db.$transaction(async tx=>{await tx.vehicle.update({where:{id:v.id},data:{status:VehicleStatus.IN_SHOP}});return tx.maintenance.create({data:{...data,organizationId:req.user!.organizationId,source:RecordSource.WEB,status:MaintenanceStatus.ACTIVE},include:{vehicle:true}})});res.status(201).json(result);}));
-app.post('/api/maintenance/:id/start',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const m=await db.maintenance.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId},include:{vehicle:true}});if(!m||m.status!==MaintenanceStatus.REPORTED)throw Object.assign(new Error('Reported maintenance item not found'),{status:404});if(m.vehicle.status===VehicleStatus.ON_TRIP)throw Object.assign(new Error('The report is synchronized, but workshop service can start only after the active trip is completed'),{status:409});if(m.vehicle.status===VehicleStatus.RETIRED)throw Object.assign(new Error('A retired vehicle cannot enter maintenance'),{status:409});const result=await db.$transaction(async tx=>{await tx.vehicle.update({where:{id:m.vehicleId},data:{status:VehicleStatus.IN_SHOP}});return tx.maintenance.update({where:{id:m.id},data:{status:MaintenanceStatus.ACTIVE},include:{vehicle:true,driver:true,trip:true}})});res.json(result);}));
-app.post('/api/maintenance/:id/close',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const m=await db.maintenance.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId},include:{vehicle:true}});if(!m||(m.status!==MaintenanceStatus.ACTIVE&&m.status!==MaintenanceStatus.REPORTED))throw Object.assign(new Error('Open maintenance record not found'),{status:404});const result=await db.$transaction(async tx=>{if(m.status===MaintenanceStatus.ACTIVE&&m.vehicle.status!==VehicleStatus.RETIRED)await tx.vehicle.update({where:{id:m.vehicleId},data:{status:VehicleStatus.AVAILABLE}});return tx.maintenance.update({where:{id:m.id},data:{status:MaintenanceStatus.CLOSED,endDate:new Date()},include:{vehicle:true,driver:true,trip:true}})});res.json(result);}));
+app.get('/api/maintenance',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>res.json(await db.maintenance.findMany({where:{organizationId:req.user!.organizationId},include:{vehicle:true},orderBy:{startDate:'desc'}}))));
+app.post('/api/maintenance',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const data=parse(maintenanceSchema,req.body);const v=await db.vehicle.findFirst({where:{id:data.vehicleId,organizationId:req.user!.organizationId}});if(!v||v.status!==VehicleStatus.AVAILABLE)throw Object.assign(new Error('Only available vehicles can enter maintenance'),{status:409});const result=await db.$transaction(async tx=>{await tx.vehicle.update({where:{id:v.id},data:{status:VehicleStatus.IN_SHOP}});return tx.maintenance.create({data:{...data,organizationId:req.user!.organizationId},include:{vehicle:true}})});res.status(201).json(result);}));
+app.post('/api/maintenance/:id/close',allow(Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const m=await db.maintenance.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId},include:{vehicle:true}});if(!m||m.status!==MaintenanceStatus.ACTIVE)throw Object.assign(new Error('Active maintenance record not found'),{status:404});const result=await db.$transaction(async tx=>{if(m.vehicle.status!==VehicleStatus.RETIRED)await tx.vehicle.update({where:{id:m.vehicleId},data:{status:VehicleStatus.AVAILABLE}});return tx.maintenance.update({where:{id:m.id},data:{status:MaintenanceStatus.CLOSED,endDate:new Date()},include:{vehicle:true}})});res.json(result);}));
 
-app.get('/api/finance',allow(Role.FINANCIAL_ANALYST,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const where={organizationId:req.user!.organizationId};const [rawFuelLogs,rawExpenses]=await Promise.all([db.fuelLog.findMany({where,include:{vehicle:true,driver:{select:{id:true,name:true}},trip:{select:{id:true,tripNo:true,source:true,destination:true}}},orderBy:{date:'desc'}}),db.expense.findMany({where,include:{vehicle:true,driver:{select:{id:true,name:true}},trip:{select:{id:true,tripNo:true,source:true,destination:true}}},orderBy:{date:'desc'}})]);const [fuelLogs,expenses]=await Promise.all([Promise.all(rawFuelLogs.map(async item=>{const {receiptObjectKey,...safe}=item;return {...safe,receiptUrl:await signedPrivateUrl(receiptObjectKey)}})),Promise.all(rawExpenses.map(async item=>{const {receiptObjectKey,...safe}=item;return {...safe,receiptUrl:await signedPrivateUrl(receiptObjectKey)}}))]);const driverTotals=new Map<string,{driverId:string|null;driverName:string;fuel:number;expenses:number;total:number}>(),tripTotals=new Map<string,{tripId:string|null;tripNo:string;route:string;fuel:number;expenses:number;total:number}>();for(const item of fuelLogs){const dk=item.driverId||'unassigned',d=driverTotals.get(dk)||{driverId:item.driverId,driverName:item.driver?.name||'Unassigned',fuel:0,expenses:0,total:0};d.fuel+=item.cost;d.total+=item.cost;driverTotals.set(dk,d);const tk=item.tripId||'unassigned',t=tripTotals.get(tk)||{tripId:item.tripId,tripNo:item.trip?.tripNo||'Unassigned',route:item.trip?`${item.trip.source} → ${item.trip.destination}`:'No trip',fuel:0,expenses:0,total:0};t.fuel+=item.cost;t.total+=item.cost;tripTotals.set(tk,t)}for(const item of expenses){const dk=item.driverId||'unassigned',d=driverTotals.get(dk)||{driverId:item.driverId,driverName:item.driver?.name||'Unassigned',fuel:0,expenses:0,total:0};d.expenses+=item.amount;d.total+=item.amount;driverTotals.set(dk,d);const tk=item.tripId||'unassigned',t=tripTotals.get(tk)||{tripId:item.tripId,tripNo:item.trip?.tripNo||'Unassigned',route:item.trip?`${item.trip.source} → ${item.trip.destination}`:'No trip',fuel:0,expenses:0,total:0};t.expenses+=item.amount;t.total+=item.amount;tripTotals.set(tk,t)}res.json({fuelLogs,expenses,byDriver:[...driverTotals.values()].sort((a,b)=>b.total-a.total),byTrip:[...tripTotals.values()].sort((a,b)=>b.total-a.total)});}));
-app.post('/api/fuel',allow(Role.FINANCIAL_ANALYST,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const data=parse(z.object({vehicleId:z.string(),liters:z.coerce.number().positive(),cost:z.coerce.number().positive(),date:z.coerce.date().optional(),odometerKm:z.coerce.number().positive().optional()}),req.body);const vehicle=await db.vehicle.findFirst({where:{id:data.vehicleId,organizationId:req.user!.organizationId}});if(!vehicle)throw Object.assign(new Error('Vehicle not found'),{status:404});res.status(201).json(await db.fuelLog.create({data:{...data,source:RecordSource.WEB,organizationId:req.user!.organizationId},include:{vehicle:true}}));}));
-app.post('/api/expenses',allow(Role.FINANCIAL_ANALYST,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const data=parse(z.object({vehicleId:z.string(),type:z.enum(ExpenseType),description:z.string().optional(),amount:z.coerce.number().positive(),date:z.coerce.date().optional()}),req.body);const vehicle=await db.vehicle.findFirst({where:{id:data.vehicleId,organizationId:req.user!.organizationId}});if(!vehicle)throw Object.assign(new Error('Vehicle not found'),{status:404});res.status(201).json(await db.expense.create({data:{...data,source:RecordSource.WEB,organizationId:req.user!.organizationId},include:{vehicle:true}}));}));
+app.get('/api/finance',allow(Role.FINANCIAL_ANALYST,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const where={organizationId:req.user!.organizationId};const [fuelLogs,expenses]=await Promise.all([db.fuelLog.findMany({where,include:{vehicle:true},orderBy:{date:'desc'}}),db.expense.findMany({where,include:{vehicle:true},orderBy:{date:'desc'}})]);res.json({fuelLogs,expenses});}));
+app.post('/api/fuel',allow(Role.FINANCIAL_ANALYST,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const data=parse(z.object({vehicleId:z.string(),liters:z.coerce.number().positive(),cost:z.coerce.number().positive(),date:z.coerce.date().optional(),odometerKm:z.coerce.number().positive().optional()}),req.body);const vehicle=await db.vehicle.findFirst({where:{id:data.vehicleId,organizationId:req.user!.organizationId}});if(!vehicle)throw Object.assign(new Error('Vehicle not found'),{status:404});res.status(201).json(await db.fuelLog.create({data:{...data,organizationId:req.user!.organizationId},include:{vehicle:true}}));}));
+app.post('/api/expenses',allow(Role.FINANCIAL_ANALYST,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const data=parse(z.object({vehicleId:z.string(),type:z.enum(['TOLL','REPAIR','INSURANCE','OTHER']),description:z.string().optional(),amount:z.coerce.number().positive(),date:z.coerce.date().optional()}),req.body);const vehicle=await db.vehicle.findFirst({where:{id:data.vehicleId,organizationId:req.user!.organizationId}});if(!vehicle)throw Object.assign(new Error('Vehicle not found'),{status:404});res.status(201).json(await db.expense.create({data:{...data,organizationId:req.user!.organizationId},include:{vehicle:true}}));}));
 
 async function analytics(organizationId:string){
   const where={organizationId};const [vehicles,fuel,maintenance,expenses,trips]=await Promise.all([db.vehicle.findMany({where}),db.fuelLog.findMany({where}),db.maintenance.findMany({where}),db.expense.findMany({where}),db.trip.findMany({where})]);
@@ -430,10 +239,10 @@ async function analytics(organizationId:string){
   const byVehicle=vehicles.map(v=>{const vf=fuel.filter(x=>x.vehicleId===v.id).reduce((s,x)=>s+x.cost,0),vm=maintenance.filter(x=>x.vehicleId===v.id).reduce((s,x)=>s+x.cost,0),ve=expenses.filter(x=>x.vehicleId===v.id).reduce((s,x)=>s+x.amount,0),vr=trips.filter(x=>x.vehicleId===v.id).reduce((s,x)=>s+x.revenue,0);return{id:v.id,name:v.name,registrationNo:v.registrationNo,operationalCost:vf+vm+ve,roi:v.acquisitionCost?((vr-vf-vm)/v.acquisitionCost)*100:0}});
   return {summary:{fuelEfficiency:liters?distance/liters:0,fleetUtilization:active?vehicles.filter(x=>x.status===VehicleStatus.ON_TRIP).length/active*100:0,operationalCost:totalFuel+totalMaintenance+totalOther,vehicleRoi:acquisition?(revenue-totalFuel-totalMaintenance)/acquisition*100:0},byVehicle};
 }
-app.get('/api/analytics',allow(),asyncRoute(async(req,res)=>res.json(await analytics(req.user!.organizationId))));
-app.get('/api/analytics/export.csv',asyncRoute(async(req,res)=>{const a=await analytics(req.user!.organizationId);const csv=['Vehicle,Registration,Operational Cost,ROI %',...a.byVehicle.map(x=>`"${x.name}","${x.registrationNo}",${x.operationalCost.toFixed(2)},${x.roi.toFixed(2)}`)].join('\n');res.type('text/csv').attachment('fleetpilot-analytics.csv').send(csv);}));
+const allowFinancialAnalytics=(req:Request,res:Response,next:NextFunction)=>disclosurePolicyForRole(req.user!.role).financialAnalytics?next():res.status(403).json({message:'You do not have permission to view financial analytics'});
+app.get('/api/analytics',allowFinancialAnalytics,asyncRoute(async(req,res)=>res.json(await analytics(req.user!.organizationId))));
+app.get('/api/analytics/export.csv',allowFinancialAnalytics,asyncRoute(async(req,res)=>{const a=await analytics(req.user!.organizationId);const csv=['Vehicle,Registration,Operational Cost,ROI %',...a.byVehicle.map(x=>`"${x.name}","${x.registrationNo}",${x.operationalCost.toFixed(2)},${x.roi.toFixed(2)}`)].join('\n');res.type('text/csv').attachment('fleetpilot-analytics.csv').send(csv);}));
 
 app.use((err:any,_req:Request,res:Response,_next:NextFunction)=>{console.error(err);if(err instanceof AssignmentEligibilityError)return res.status(err.status).json({code:err.code,message:err.message,reasons:err.reasons});if(err instanceof Prisma.PrismaClientKnownRequestError){if(err.code==='P2002')return res.status(409).json({message:'A record with this unique value already exists'});if(err.code==='P2022')return res.status(503).json({message:'Database setup is incomplete. Please run the latest FleetPilot migration.'});return res.status(500).json({message:'The database could not complete this request'});}if(err instanceof Prisma.PrismaClientValidationError)return res.status(400).json({message:'The request contains invalid data'});res.status(err.status||500).json({message:err.status?err.message:'Something went wrong. Please try again.'});});
 app.listen(PORT,()=>console.log(`TransitOps API running at http://localhost:${PORT}`));
-const fastagPoller=setInterval(()=>{void pollFastagProviders()},5*60_000);fastagPoller.unref();
 process.on('SIGTERM',async()=>{await db.$disconnect();process.exit(0)});

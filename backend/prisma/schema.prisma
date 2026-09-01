@@ -124,6 +124,7 @@ model User {
   lastActiveAt       DateTime?
   createdAt          DateTime     @default(now())
   driverProfile      Driver?
+  copilotActions     CopilotAction[]
 
   @@index([organizationId])
 }
@@ -145,6 +146,7 @@ model Organization {
   tripEvidence       TripEvidence[]
   fastagConnections  FastagConnection[]
   fastagTransactions FastagTransaction[]
+  copilotActions     CopilotAction[]
 }
 
 model Vehicle {
@@ -220,6 +222,11 @@ model Trip {
   plannedDistanceKm        Float
   estimatedDurationMinutes Int?
   estimatedToll            Float               @default(0)
+  estimatedTollsInr        Float?
+  estimatedDurationMin     Int?
+  routeSummary             String?
+  tollEstimateStatus       String?
+  routeEstimatedAt         DateTime?
   routeStrategy            String?
   routeLabel               String?
   routeVia                 String?
@@ -243,6 +250,7 @@ model Trip {
   fuelLogs                 FuelLog[]
   expenses                 Expense[]
   fastagTransactions       FastagTransaction[]
+  copilotActions           CopilotAction[]
 
   @@unique([organizationId, tripNo])
   @@index([organizationId])
@@ -428,4 +436,24 @@ model FastagTransaction {
   @@unique([connectionId, providerTxnId])
   @@index([organizationId, occurredAt])
   @@index([tripId, matchStatus])
+}
+
+model CopilotAction {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type           String
+  status         String
+  idempotencyKey String
+  request        Json
+  result         Json?
+  tripId         String?
+  trip           Trip?        @relation(fields: [tripId], references: [id], onDelete: SetNull)
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, createdAt])
+  @@index([userId])
 }

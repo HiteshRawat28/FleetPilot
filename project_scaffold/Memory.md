@@ -39,6 +39,48 @@
 
 ## Milestone log
 
+### 2026-09-01 — Dashboard manual trip shortcut
+
+- Connected the dashboard `New trip` action to the existing Trip dispatch workflow, where it opens the full manual trip planner immediately after navigation.
+- Reused the current trip form and API path so route estimates, resource availability, assignment validation, profitability, and draft creation remain consistent with trips created from Trip dispatch.
+- Limited the shortcut to Owner, Administrator, Fleet Manager, and Dispatcher roles; Safety Officer and Financial Analyst dashboards do not render it.
+
+### 2026-09-01 — Organization-admin conversational trip creation
+
+- Added an organization-administrator guided planner inside Copilot for `OWNER` and `ADMIN`, with organization-scoped clickable vehicle and compatible-driver choices. Remaining route, cargo, distance, and revenue details are collected conversationally, one missing value at a time.
+- Selected internal vehicle/driver IDs go directly to the backend rather than through Groq; the conversation and confirmation card display only business-facing details.
+- Restricted both preparation and confirmation to `OWNER` and `ADMIN`. Fleet Manager, Dispatcher, Safety Officer, and Financial Analyst cannot access the workflow.
+- Preparation remains write-free. Explicit confirmation revalidates organization membership, role, assignment eligibility, token expiry, and idempotency before creating one `DRAFT` trip.
+- Admin trip-creation phrases now open the real guided planner deterministically. Model-generated text that imitates a confirmation button without a signed action is replaced with a safe recovery message.
+- Assignment failures now show every structured eligibility reason in the chat and automatically reopen current vehicle/driver choices while preserving the already collected route, cargo, distance, and revenue.
+
+### 2026-09-01 — Copilot field-level and session hardening
+
+- Added one server-side disclosure policy for role-specific recent-trip identities, driver licence numbers, trip revenue, and financial analytics.
+- Projected tool results before Groq so internal IDs and unnecessary database fields are absent; restricted analytics in both Copilot and direct JSON/CSV APIs.
+- Added deterministic final-answer filtering for known identifiers, CUIDs, UUIDs, and JWT-shaped tokens, including ambiguity-path disclosure tests.
+- Added organization-scope and per-field tests at the tool boundary; the current backend validation suite has 54 tests across 8 files.
+- Replaced browser local-storage JWTs with an 8-hour HttpOnly cookie, moved Copilot history to user/organization-scoped session storage, added origin checks and API security headers, and clear both session and history on logout.
+
+### 2026-09-01 — Global floating Copilot launcher
+
+- Moved Copilot out of the application header into a fixed, circular FleetPilot-branded launcher available across authenticated modules.
+- Added keyboard focus treatment, mobile positioning, and reduced-motion behavior while preserving the existing drawer and page context.
+
+### 2026-09-01 — Isolated Copilot edge-case fixture
+
+- Added an organization-targeted, idempotent chatbot fixture and cleanup command; it never invokes the destructive primary seed.
+- The fixture covers recommendations, expiring/expired licences, active maintenance, stale drafts, capacity and category conflicts, ambiguous lookups, all trip states, and recent versus older costs.
+- Added a prompt checklist covering guarded confirmation, idempotency, stale/expired proposals, role boundaries, prompt injection, rate limiting, and offline API behavior.
+
+### 2026-09-01 — Phase 2 recommendations and guarded Phase 3 draft actions
+
+- Added role-scoped eligible vehicle/driver recommendations and operational-risk summaries for expiring licences, active maintenance, and stale drafts.
+- Added draft-trip proposal cards with short-lived signed confirmation tokens that are never persisted in browser history.
+- Confirmation is bound to the user, organization, role, action type, and idempotency key; it revalidates assignment state in a serializable transaction before creating a `DRAFT` trip.
+- Added `CopilotAction` audit/idempotency storage, an additive migration and upgrade path, token integrity/expiry tests, and expanded role-matrix tests.
+- Copilot still cannot dispatch, complete, cancel, edit, delete, operate maintenance, record finance data, or run autonomously. Those later phases require separately approved workflows and notification design.
+
 ### 2026-08-31 — Phase 1 read-only FleetPilot Copilot
 
 - Added an authenticated Copilot drawer with page-aware prompts, session-local conversation history, configuration/error states, and structured evidence cards.

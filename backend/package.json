@@ -13,6 +13,8 @@
     "db:upgrade:trip-dispatch": "prisma db execute --schema prisma/schema.prisma --file prisma/upgrade-trip-dispatch-fastag.sql && prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:seed": "tsx prisma/seed.ts",
+    "db:seed:chatbot": "tsx prisma/seed-chatbot-test-data.ts",
+    "db:clean:chatbot": "tsx prisma/seed-chatbot-test-data.ts --clean",
     "test": "vitest run"
   },
   "dependencies": {
