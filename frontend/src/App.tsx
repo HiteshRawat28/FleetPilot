@@ -728,17 +728,15 @@ function Login({ onLogin }: { onLogin: (u: User) => void }) {
           scrub: true,
         },
       });
-      gsap.utils
-        .toArray<HTMLElement>(".reveal")
-        .forEach((el) =>
-          gsap.from(el, {
-            scrollTrigger: { trigger: el, start: "top 82%" },
-            y: 70,
-            opacity: 0,
-            duration: 1,
-            ease: "power3.out",
-          }),
-        );
+      gsap.utils.toArray<HTMLElement>(".reveal").forEach((el) =>
+        gsap.from(el, {
+          scrollTrigger: { trigger: el, start: "top 82%" },
+          y: 70,
+          opacity: 0,
+          duration: 1,
+          ease: "power3.out",
+        }),
+      );
       const desktop = gsap.matchMedia();
       desktop.add("(min-width: 1001px)", () => {
         const track = document.querySelector<HTMLElement>(".modules-track");
@@ -4573,6 +4571,16 @@ function LiveTripTracking({
             <span>
               <b>Tracking connection unavailable</b>
               {error}
+            </span>
+          </div>
+        )}
+        {data?.trustWarning && (
+          <div className="alert">
+            <AlertTriangle />
+            <span>
+              <b>GPS integrity notice</b>
+              {data.trustWarning}. The measured position is still shown so
+              dispatch can verify it.
             </span>
           </div>
         )}

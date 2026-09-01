@@ -6,6 +6,7 @@ export type TrackingSnapshotEvent = {
   trackingStatus: TripTracking["trackingStatus"];
   latestLocation: TripLocationPoint | null;
   history: TripLocationPoint[];
+  trustWarning?: string | null;
   serverTime: string;
 };
 
@@ -13,6 +14,7 @@ export type LocationUpdateEvent = {
   type: "LOCATION_UPDATE";
   trackingStatus: TripTracking["trackingStatus"];
   location: TripLocationPoint;
+  trustWarning?: string | null;
   serverTime: string;
 };
 
@@ -34,6 +36,7 @@ export function applyTrackingEvent(
       trackingStatus: event.trackingStatus,
       latestLocation: event.latestLocation,
       history: event.history.slice(-100),
+      trustWarning: event.trustWarning ?? null,
       serverTime: event.serverTime,
     };
   }
@@ -46,6 +49,7 @@ export function applyTrackingEvent(
       ...current.history.filter((point) => point.id !== event.location.id),
       event.location,
     ].slice(-100),
+    trustWarning: event.trustWarning ?? null,
     serverTime: event.serverTime,
   };
 }

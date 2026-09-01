@@ -130,6 +130,7 @@ run.sequential("driver mobile to web live-location integration", () => {
       },
     );
     expect(future.response.status).toBe(422);
+    expect(jsonBody(future).code).toBe("LOCATION_TIMESTAMP_INVALID");
   });
 
   it("accepts the first GPS point once and exposes it to web tracking", async () => {
@@ -188,6 +189,63 @@ run.sequential("driver mobile to web live-location integration", () => {
       },
     });
     expect(webTrackingBody.history).toHaveLength(1);
+  });
+
+  it("keeps the exact off-route GPS position visible with a trust warning", async () => {
+    const point = {
+      clientRequestId: randomUUID(),
+      latitude: 28.6139,
+      longitude: 77.209,
+      accuracyM: 8,
+      capturedAt: new Date().toISOString(),
+    };
+    const upload = await request(
+      "/driver/me/trips/integration-trip-dispatched/locations",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${driverToken}` },
+        body: JSON.stringify({ points: [point] }),
+      },
+    );
+    expect(upload.response.status).toBe(201);
+    expect(jsonBody(upload).accepted).toBe(1);
+    expect(jsonBody(upload).latestLocation).toMatchObject({
+      latitude: point.latitude,
+      longitude: point.longitude,
+      accuracyM: point.accuracyM,
+      capturedAt: point.capturedAt,
+    });
+    expect(jsonBody(upload).trustWarning).toContain("planned trip corridor");
+
+    const webTracking = await request(
+      "/trips/integration-trip-dispatched/location",
+      { headers: { authorization: `Bearer ${managerToken}` } },
+    );
+    expect(jsonBody(webTracking).latestLocation).toMatchObject({
+      latitude: point.latitude,
+      longitude: point.longitude,
+      accuracyM: point.accuracyM,
+      capturedAt: point.capturedAt,
+    });
+    expect(jsonBody(webTracking).trustWarning).toContain(
+      "planned trip corridor",
+    );
+  });
+
+  it("opens the authorized website SSE channel with the canonical snapshot", async () => {
+    const response = await fetch(
+      `${baseUrl}/trips/integration-trip-dispatched/location/stream`,
+      { headers: { authorization: `Bearer ${managerToken}` } },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const reader = response.body!.getReader();
+    const firstChunk = await reader.read();
+    await reader.cancel();
+    const event = new TextDecoder().decode(firstChunk.value);
+    expect(event).toContain("TRACKING_SNAPSHOT");
+    expect(event).toContain("IN_PROGRESS");
+    expect(event).toContain("LIVE");
   });
 
   it("stops accepting driver locations after web operations completes the trip", async () => {

@@ -44,11 +44,27 @@ describe("web live tracking integration", () => {
       trackingStatus: "WAITING_FOR_GPS",
       latestLocation: null,
       history: [],
+      trustWarning: null,
       serverTime: "2026-09-01T12:00:00.000Z",
     });
     expect(result?.trackingStatus).toBe("WAITING_FOR_GPS");
     expect(result?.latestLocation).toBeNull();
     expect(result?.history).toEqual([]);
+  });
+
+  it("keeps an exact off-route point visible with its trust warning", () => {
+    const warning = "Location is 640 km away from the planned trip corridor";
+    const result = applyTrackingEvent(null, {
+      type: "TRACKING_SNAPSHOT",
+      trip,
+      trackingStatus: "LIVE",
+      latestLocation: point("off-route"),
+      history: [point("off-route")],
+      trustWarning: warning,
+      serverTime: "2026-09-01T12:00:00.000Z",
+    });
+    expect(result?.latestLocation?.id).toBe("off-route");
+    expect(result?.trustWarning).toBe(warning);
   });
 
   it("deduplicates SSE updates and retains only the newest 100 points", () => {
