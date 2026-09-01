@@ -4,6 +4,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 require("dotenv/config");
+const node_crypto_1 = require("node:crypto");
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
@@ -22,7 +23,12 @@ const objectStorage_1 = require("./services/objectStorage");
 const ocr_1 = require("./services/ocr");
 const security_1 = require("./chat/security");
 const session_1 = require("./auth/session");
+const passwordPolicy_1 = require("./auth/passwordPolicy");
+const passwordReset_1 = require("./auth/passwordReset");
+const rateLimit_1 = require("./auth/rateLimit");
+const email_1 = require("./services/email");
 const locationTracking_1 = require("./services/locationTracking");
+const notificationAudience_1 = require("./services/notificationAudience");
 const db = new client_1.PrismaClient();
 const app = (0, express_1.default)();
 const PORT = Number(process.env.PORT || 4000);
@@ -32,6 +38,9 @@ const tripProfitabilityConfig = (0, tripProfitability_1.loadTripProfitabilityCon
 const googleClient = new google_auth_library_1.OAuth2Client(GOOGLE_CLIENT_ID);
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173').split(',').map(origin => origin.trim());
 const cookieOptions = (0, session_1.sessionCookieOptions)(process.env.NODE_ENV === 'production');
+const { maxAge: _maxAge, ...clearCookieOptions } = cookieOptions;
+const passwordResetService = new passwordReset_1.PasswordResetService(db, process.env.PASSWORD_RESET_URL || `${allowedOrigins[0]}/reset-password`);
+(0, email_1.assertEmailConfiguration)();
 const tripLocationStreams = new Map();
 const publishTripLocation = (tripId, payload) => {
     const message = `data: ${JSON.stringify(payload)}\n\n`;
@@ -61,7 +70,7 @@ const authenticate = asyncRoute(async (req, res, next) => {
     try {
         const claims = jsonwebtoken_1.default.verify(token, SECRET);
         const account = await db.user.findUnique({ where: { id: claims.id }, include: { organization: true, driver: true } });
-        if (!account || !account.isActive)
+        if (!account || !account.isActive || !(0, session_1.sessionVersionMatches)(claims.sessionVersion, account.sessionVersion))
             return res.status(401).json({ message: 'This session no longer has access' });
         await db.user.update({ where: { id: account.id }, data: { lastActiveAt: new Date() } });
         req.user = publicUser(account);
@@ -81,12 +90,14 @@ const slugify = (name) => name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').
 const moneyForLog = (amount) => `INR ${Math.round(amount).toLocaleString('en-IN')}`;
 const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email, phone: user.phone, jobTitle: user.jobTitle, role: user.role, organizationId: user.organizationId, organizationName: user.organization.name, driverId: user.driver?.id || null, onboardingStatus: user.driver?.onboardingStatus || null, mustChangePassword: user.mustChangePassword });
 const isMobileClient = (req) => req.get('x-transitops-client') === 'mobile' || req.get('ngrok-skip-browser-warning') === 'transitops-mobile';
-const sendSession = (req, res, user, status = 200) => {
-    const token = jsonwebtoken_1.default.sign(user, SECRET, { expiresIn: '8h' });
-    res.cookie(session_1.SESSION_COOKIE, token, cookieOptions);
-    res.setHeader('Cache-Control', 'no-store');
-    return res.status(status).json(isMobileClient(req) ? { token, user } : { user });
-};
+async function notifyTripUsers(client, input) {
+    const users = await client.user.findMany({ where: { organizationId: input.organizationId, isActive: true }, select: { id: true, role: true, driver: { select: { id: true } } } });
+    const recipients = users.filter(user => (0, notificationAudience_1.receivesTripNotification)(user.role, user.driver?.id || null, input.assignedDriverId || null));
+    if (!recipients.length)
+        return;
+    await client.notification.createMany({ data: recipients.map(user => ({ organizationId: input.organizationId, userId: user.id, type: input.type, title: input.title, message: input.message, tripId: input.tripId })) });
+}
+const sendSession = (req, res, account, status = 200) => { const user = publicUser(account); const token = jsonwebtoken_1.default.sign({ ...user, sessionVersion: account.sessionVersion }, SECRET, { expiresIn: '8h' }); res.cookie(session_1.SESSION_COOKIE, token, cookieOptions); res.setHeader('Cache-Control', 'no-store'); return res.status(status).json(isMobileClient(req) ? { token, user } : { user }); };
 const modulesByRole = {
     OWNER: ['Overview', 'Fleet registry', 'Drivers', 'Driver access', 'Trip dispatch', 'Profitability', 'Maintenance', 'Fuel & expenses', 'Reports', 'Company settings', 'User access'],
     ADMIN: ['Overview', 'Fleet registry', 'Drivers', 'Driver access', 'Trip dispatch', 'Profitability', 'Maintenance', 'Fuel & expenses', 'Reports', 'Company settings', 'User access'],
@@ -121,6 +132,11 @@ async function driverDashboardResponse(driverId, organizationId) {
     ]);
     return { profile, trips, expenses: await Promise.all(expenses.map(expenseResponse)) };
 }
+const requestIp = (req) => req.ip || req.socket.remoteAddress || 'unknown';
+const forgotIpLimit = (0, rateLimit_1.createRateLimit)({ windowMs: 60 * 60_000, max: 20, key: requestIp });
+const forgotEmailLimit = (0, rateLimit_1.createRateLimit)({ windowMs: 60 * 60_000, max: 5, key: req => (0, rateLimit_1.privacyHash)(String(req.body?.email || '')) });
+const resetIpLimit = (0, rateLimit_1.createRateLimit)({ windowMs: 15 * 60_000, max: 10, key: requestIp });
+const authAudit = (event, requestId, result, userId) => console.info(JSON.stringify({ event, requestId, result, ...(userId ? { userId } : {}), occurredAt: new Date().toISOString() }));
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'TransitOps API' }));
 app.post('/api/auth/login', asyncRoute(async (req, res) => {
     const { email, password } = parse(zod_1.z.object({ email: zod_1.z.email(), password: zod_1.z.string().min(8) }), req.body);
@@ -130,7 +146,7 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
     if (!user.isActive)
         return res.status(403).json({ message: 'Your account has been suspended. Contact your company administrator.' });
     await db.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date(), lastActiveAt: new Date() } });
-    sendSession(req, res, publicUser(user));
+    sendSession(req, res, user);
 }));
 app.post('/api/driver/auth/login', asyncRoute(async (req, res) => {
     const { email, password } = parse(zod_1.z.object({ email: zod_1.z.email(), password: zod_1.z.string().min(8) }), req.body);
@@ -141,13 +157,13 @@ app.post('/api/driver/auth/login', asyncRoute(async (req, res) => {
         return res.status(403).json({ message: 'Your account has been suspended. Contact your company administrator.' });
     if (user.role !== client_1.Role.DRIVER || !user.driver)
         return res.status(403).json({ message: 'A linked Driver account is required for mobile driver access' });
-    const session = publicUser(user), token = jsonwebtoken_1.default.sign(session, SECRET, { expiresIn: '24h' });
+    const session = publicUser(user), token = jsonwebtoken_1.default.sign({ ...session, sessionVersion: user.sessionVersion }, SECRET, { expiresIn: '24h' });
     await db.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date(), lastActiveAt: new Date() } });
     res.setHeader('Cache-Control', 'no-store');
     res.json({ token, user: session });
 }));
 app.post('/api/auth/register', asyncRoute(async (req, res) => {
-    const { name, email, password, companyName } = parse(zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: zod_1.z.string().min(10).regex(/[A-Z]/, 'Password needs an uppercase letter').regex(/[0-9]/, 'Password needs a number'), companyName: zod_1.z.string().trim().min(2).max(100) }), req.body);
+    const { name, email, password, companyName } = parse(zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: passwordPolicy_1.passwordSchema, companyName: zod_1.z.string().trim().min(2).max(100) }), req.body);
     const normalizedEmail = email.toLowerCase();
     if (await db.user.findUnique({ where: { email: normalizedEmail } }))
         return res.status(409).json({ message: 'An account already exists for this email' });
@@ -160,7 +176,7 @@ app.post('/api/auth/register', asyncRoute(async (req, res) => {
         const organization = await tx.organization.create({ data: { name: companyName, slug, operationsEmail: normalizedEmail } });
         return tx.user.create({ data: { name, email: normalizedEmail, passwordHash: await bcryptjs_1.default.hash(password, 12), role: client_1.Role.OWNER, organizationId: organization.id, lastLoginAt: new Date(), lastActiveAt: new Date() }, include: { organization: true, driver: true } });
     });
-    sendSession(req, res, publicUser(user), 201);
+    sendSession(req, res, user, 201);
 }));
 app.post('/api/auth/google', asyncRoute(async (req, res) => {
     if (!GOOGLE_CLIENT_ID)
@@ -189,25 +205,70 @@ app.post('/api/auth/google', asyncRoute(async (req, res) => {
             return res.status(409).json({ message: 'This email is linked to another Google identity' });
         user = await db.user.update({ where: { id: user.id }, data: { googleSub: payload.sub, lastLoginAt: new Date(), lastActiveAt: new Date() }, include: { organization: true, driver: true } });
     }
-    sendSession(req, res, publicUser(user));
+    sendSession(req, res, user);
 }));
 app.post('/api/driver/auth/register', (_req, res) => res.status(410).json({ message: 'Driver accounts are created by the company in User Access. Use the credentials provided by your fleet manager.' }));
-app.post('/api/auth/logout', (_req, res) => { const { maxAge: _maxAge, ...clearCookieOptions } = cookieOptions; res.clearCookie(session_1.SESSION_COOKIE, clearCookieOptions); res.status(204).end(); });
+app.post('/api/auth/forgot-password', forgotIpLimit, forgotEmailLimit, asyncRoute(async (req, res) => {
+    const { email } = parse(zod_1.z.object({ email: zod_1.z.email() }), req.body);
+    const requestId = (0, node_crypto_1.randomUUID)();
+    res.setHeader('X-Request-Id', requestId);
+    try {
+        const userId = await passwordResetService.request(email);
+        authAudit('password_reset_requested', requestId, userId ? 'issued' : 'ignored', userId || undefined);
+    }
+    catch (error) {
+        authAudit('password_reset_requested', requestId, 'delivery_failed');
+        console.error('Password-reset delivery failed:', error instanceof Error ? error.message : 'Unknown error');
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(202).json({ message: 'If an account exists for that email, password-reset instructions have been sent.' });
+}));
+app.post('/api/auth/reset-password', resetIpLimit, asyncRoute(async (req, res) => {
+    const { token, password } = parse(zod_1.z.object({ token: zod_1.z.string().min(32).max(200), password: passwordPolicy_1.passwordSchema }), req.body);
+    const requestId = (0, node_crypto_1.randomUUID)();
+    res.setHeader('X-Request-Id', requestId);
+    const userId = await passwordResetService.reset(token, password);
+    authAudit('password_reset_completed', requestId, 'completed', userId);
+    res.clearCookie(session_1.SESSION_COOKIE, clearCookieOptions);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ message: 'Your password has been reset. Please sign in.' });
+}));
+app.post('/api/auth/logout', (_req, res) => { res.clearCookie(session_1.SESSION_COOKIE, clearCookieOptions); res.status(204).end(); });
 app.get('/api/auth/me', authenticate, (req, res) => { res.setHeader('Cache-Control', 'no-store'); res.json({ user: req.user }); });
 app.use('/api', authenticate);
 app.post('/api/auth/change-password', asyncRoute(async (req, res) => {
-    const { currentPassword, newPassword } = parse(zod_1.z.object({ currentPassword: zod_1.z.string().min(8), newPassword: zod_1.z.string().min(10).regex(/[A-Z]/, 'Password needs an uppercase letter').regex(/[0-9]/, 'Password needs a number') }), req.body);
+    const { currentPassword, newPassword } = parse(zod_1.z.object({ currentPassword: zod_1.z.string().min(8), newPassword: passwordPolicy_1.passwordSchema }), req.body);
     const account = await db.user.findUnique({ where: { id: req.user.id } });
     if (!account?.passwordHash || !(await bcryptjs_1.default.compare(currentPassword, account.passwordHash)))
         return res.status(401).json({ message: 'Current password is incorrect' });
-    const user = await db.user.update({ where: { id: account.id }, data: { passwordHash: await bcryptjs_1.default.hash(newPassword, 12), mustChangePassword: false }, include: { organization: true, driver: true } });
+    const user = await db.user.update({ where: { id: account.id }, data: { passwordHash: await bcryptjs_1.default.hash(newPassword, 12), mustChangePassword: false, sessionVersion: { increment: 1 } }, include: { organization: true, driver: true } });
     const session = publicUser(user);
-    res.cookie(session_1.SESSION_COOKIE, jsonwebtoken_1.default.sign(session, SECRET, { expiresIn: '8h' }), cookieOptions);
+    res.cookie(session_1.SESSION_COOKIE, jsonwebtoken_1.default.sign({ ...session, sessionVersion: user.sessionVersion }, SECRET, { expiresIn: '8h' }), cookieOptions);
     res.setHeader('Cache-Control', 'no-store');
-    res.json({ user: session, ...(session.role === client_1.Role.DRIVER ? { token: jsonwebtoken_1.default.sign(session, SECRET, { expiresIn: '24h' }) } : {}) });
+    res.json({ user: session, ...(session.role === client_1.Role.DRIVER ? { token: jsonwebtoken_1.default.sign({ ...session, sessionVersion: user.sessionVersion }, SECRET, { expiresIn: '24h' }) } : {}) });
 }));
 app.use('/api/chat', (0, chat_1.createChatRouter)(db));
 app.get('/api/profile', asyncRoute(async (req, res) => res.json(await profileResponse(req.user.id))));
+app.get('/api/notifications', asyncRoute(async (req, res) => {
+    const limit = parse(zod_1.z.coerce.number().int().min(1).max(50), req.query.limit || 20);
+    const where = { organizationId: req.user.organizationId, userId: req.user.id };
+    const [items, unreadCount] = await Promise.all([
+        db.notification.findMany({ where, select: { id: true, type: true, title: true, message: true, tripId: true, readAt: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: limit }),
+        db.notification.count({ where: { ...where, readAt: null } })
+    ]);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ items, unreadCount });
+}));
+app.post('/api/notifications/read-all', asyncRoute(async (req, res) => {
+    await db.notification.updateMany({ where: { organizationId: req.user.organizationId, userId: req.user.id, readAt: null }, data: { readAt: new Date() } });
+    res.status(204).end();
+}));
+app.post('/api/notifications/:id/read', asyncRoute(async (req, res) => {
+    const result = await db.notification.updateMany({ where: { id: idParam(req), organizationId: req.user.organizationId, userId: req.user.id, readAt: null }, data: { readAt: new Date() } });
+    if (!result.count && !(await db.notification.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId, userId: req.user.id }, select: { id: true } })))
+        throw Object.assign(new Error('Notification not found'), { status: 404 });
+    res.status(204).end();
+}));
 app.get('/api/search', asyncRoute(async (req, res) => {
     const query = String(req.query.q || '').trim().slice(0, 80);
     if (query.length < 2)
@@ -327,8 +388,8 @@ app.get('/api/users', allow(client_1.Role.OWNER, client_1.Role.ADMIN), asyncRout
     const users = await db.user.findMany({ where: { organizationId: req.user.organizationId }, select: { id: true, name: true, email: true, role: true, isActive: true, lastLoginAt: true, lastActiveAt: true, createdAt: true, googleSub: true, driver: { select: { id: true, licenseNo: true, licenseCategory: true, licenseExpiry: true, onboardingStatus: true, reviewNote: true, status: true, payType: true, payRate: true, createdAt: true, documents: { select: { id: true, type: true, originalName: true, mimeType: true, size: true, createdAt: true }, orderBy: { createdAt: 'desc' } } } } }, orderBy: { createdAt: 'asc' } });
     res.json(users);
 }));
-const teamAccessSchema = zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: zod_1.z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/), role: zod_1.z.enum(client_1.Role).refine(role => role !== client_1.Role.OWNER && role !== client_1.Role.DRIVER, 'Driver accounts must be created from Driver Access') });
-const driverAccessSchema = zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: zod_1.z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/), contact: zod_1.z.string().trim().min(7).max(30), payType: zod_1.z.enum(client_1.DriverPayType).default(client_1.DriverPayType.PER_TRIP), payRate: zod_1.z.coerce.number().nonnegative().default(0) });
+const teamAccessSchema = zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: passwordPolicy_1.passwordSchema, role: zod_1.z.enum(client_1.Role).refine(role => role !== client_1.Role.OWNER && role !== client_1.Role.DRIVER, 'Driver accounts must be created from Driver Access') });
+const driverAccessSchema = zod_1.z.object({ name: zod_1.z.string().trim().min(2).max(80), email: zod_1.z.email(), password: passwordPolicy_1.passwordSchema, contact: zod_1.z.string().trim().min(7).max(30), payType: zod_1.z.enum(client_1.DriverPayType).default(client_1.DriverPayType.PER_TRIP), payRate: zod_1.z.coerce.number().nonnegative().default(0) });
 app.post('/api/users', allow(client_1.Role.OWNER, client_1.Role.ADMIN), asyncRoute(async (req, res) => {
     const { name, email, password, role } = parse(teamAccessSchema, req.body);
     if (req.user.role === client_1.Role.ADMIN && role === client_1.Role.ADMIN)
@@ -349,9 +410,9 @@ app.post('/api/driver-access', allow(client_1.Role.OWNER, client_1.Role.ADMIN, c
 }));
 app.patch('/api/users/:id', allow(client_1.Role.OWNER, client_1.Role.ADMIN), asyncRoute(async (req, res) => { const target = await db.user.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId } }); if (!target)
     throw Object.assign(new Error('Team member not found'), { status: 404 }); if (target.role === client_1.Role.OWNER)
-    return res.status(403).json({ message: 'Owner access cannot be changed' }); const data = parse(zod_1.z.object({ role: zod_1.z.enum(client_1.Role).refine(r => r !== client_1.Role.OWNER).optional(), isActive: zod_1.z.boolean().optional(), password: zod_1.z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/).optional() }), req.body); if (req.user.role === client_1.Role.ADMIN && (target.role === client_1.Role.ADMIN || data.role === client_1.Role.ADMIN))
+    return res.status(403).json({ message: 'Owner access cannot be changed' }); const data = parse(zod_1.z.object({ role: zod_1.z.enum(client_1.Role).refine(r => r !== client_1.Role.OWNER).optional(), isActive: zod_1.z.boolean().optional(), password: passwordPolicy_1.passwordSchema.optional() }), req.body); if (req.user.role === client_1.Role.ADMIN && (target.role === client_1.Role.ADMIN || data.role === client_1.Role.ADMIN))
     return res.status(403).json({ message: 'Only the Owner can manage Admin access' }); if (data.role && data.role !== target.role && (data.role === client_1.Role.DRIVER || target.role === client_1.Role.DRIVER))
-    return res.status(409).json({ message: 'Driver access must be created as a new linked Driver account' }); res.json(await db.user.update({ where: { id: target.id }, data: { role: data.role, isActive: data.isActive, ...(data.password ? { passwordHash: await bcryptjs_1.default.hash(data.password, 12), mustChangePassword: target.role === client_1.Role.DRIVER } : {}) }, select: { id: true, name: true, email: true, role: true, isActive: true, lastLoginAt: true, lastActiveAt: true, createdAt: true, googleSub: true } })); }));
+    return res.status(409).json({ message: 'Driver access must be created as a new linked Driver account' }); res.json(await db.user.update({ where: { id: target.id }, data: { role: data.role, isActive: data.isActive, ...(data.password ? { passwordHash: await bcryptjs_1.default.hash(data.password, 12), mustChangePassword: target.role === client_1.Role.DRIVER, sessionVersion: { increment: 1 } } : {}) }, select: { id: true, name: true, email: true, role: true, isActive: true, lastLoginAt: true, lastActiveAt: true, createdAt: true, googleSub: true } })); }));
 app.get('/api/dashboard', asyncRoute(async (req, res) => {
     const showRecentTrips = (0, security_1.disclosurePolicyForRole)(req.user.role).recentTripDetails;
     const [vehicles, drivers, trips, recentTrips] = await Promise.all([
@@ -497,10 +558,17 @@ app.post('/api/driver/me/trips/:id/locations', driverOnly, asyncRoute(async (req
     const dispatchStartedAt = trip.dispatchedAt || trip.createdAt;
     if (points.some(point => !(0, locationTracking_1.locationTimestampBelongsToDispatch)(point.capturedAt, dispatchStartedAt)))
         return res.status(422).json({ message: 'Location timestamps must belong to this dispatch and cannot be more than five minutes in the future' });
-    const created = await db.tripLocation.createMany({ data: points.map(point => ({ organizationId: req.user.organizationId, tripId: trip.id, driverId: driver.id, ...point })), skipDuplicates: true });
-    const currentStatus = created.count > 0 && trip.status === client_1.TripStatus.DISPATCHED
-        ? (await db.trip.update({ where: { id: trip.id }, data: { status: client_1.TripStatus.IN_PROGRESS, startedAt: trip.startedAt || new Date() } })).status
-        : trip.status;
+    const { created, currentStatus } = await db.$transaction(async (tx) => {
+        const created = await tx.tripLocation.createMany({ data: points.map(point => ({ organizationId: req.user.organizationId, tripId: trip.id, driverId: driver.id, ...point })), skipDuplicates: true });
+        let currentStatus = trip.status;
+        if (created.count > 0 && trip.status === client_1.TripStatus.DISPATCHED) {
+            const changed = await tx.trip.updateMany({ where: { id: trip.id, status: client_1.TripStatus.DISPATCHED }, data: { status: client_1.TripStatus.IN_PROGRESS, startedAt: trip.startedAt || new Date() } });
+            if (changed.count)
+                await notifyTripUsers(tx, { organizationId: req.user.organizationId, tripId: trip.id, assignedDriverId: driver.id, type: client_1.NotificationType.TRIP_STARTED, title: `${trip.tripNo} started`, message: `${driver.name} started the trip from ${trip.source} to ${trip.destination}.` });
+            currentStatus = changed.count ? client_1.TripStatus.IN_PROGRESS : (await tx.trip.findUnique({ where: { id: trip.id }, select: { status: true } }))?.status || client_1.TripStatus.IN_PROGRESS;
+        }
+        return { created, currentStatus };
+    });
     const latestLocation = await db.tripLocation.findFirst({ where: { tripId: trip.id, organizationId: req.user.organizationId }, orderBy: { capturedAt: 'desc' }, select: { id: true, latitude: true, longitude: true, accuracyM: true, speedKph: true, headingDeg: true, altitudeM: true, batteryPct: true, isMocked: true, capturedAt: true, receivedAt: true } });
     if (latestLocation)
         publishTripLocation(trip.id, { type: 'LOCATION_UPDATE', tripId: trip.id, tripStatus: currentStatus, trackingStatus: (0, locationTracking_1.trackingStatus)(currentStatus, latestLocation.capturedAt), location: latestLocation, serverTime: new Date() });
@@ -641,7 +709,12 @@ app.post('/api/trips', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAG
     (0, assignmentEligibility_1.assertAssignmentEligible)({ ...context, cargoWeightKg: data.cargoWeightKg });
     const tripNo = `TRP${String((await db.trip.count({ where: { organizationId: req.user.organizationId } })) + 1).padStart(4, '0')}`;
     const estimate = await estimateTripProfitability(req.user.organizationId, { vehicleId: data.vehicleId, plannedDistanceKm: data.plannedDistanceKm, revenue: data.revenue, estimatedTollsInr: data.estimatedTollsInr });
-    res.status(201).json(await db.trip.create({ data: { ...data, ...estimatedProfitabilityData(estimate), tripNo, organizationId: req.user.organizationId }, include: { vehicle: true, driver: true } }));
+    const result = await db.$transaction(async (tx) => {
+        const created = await tx.trip.create({ data: { ...data, ...estimatedProfitabilityData(estimate), tripNo, organizationId: req.user.organizationId }, include: { vehicle: true, driver: true } });
+        await notifyTripUsers(tx, { organizationId: req.user.organizationId, tripId: created.id, type: client_1.NotificationType.TRIP_CREATED, title: `${created.tripNo} draft created`, message: `A new trip from ${created.source} to ${created.destination} is ready for dispatch review.` });
+        return created;
+    });
+    res.status(201).json(result);
 }));
 app.post('/api/trips/:id/dispatch', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => {
     const trip = await db.trip.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId } });
@@ -655,27 +728,29 @@ app.post('/api/trips/:id/dispatch', allow(client_1.Role.DISPATCHER, client_1.Rol
         const driver = await tx.driver.updateMany({ where: { id: trip.driverId, organizationId: req.user.organizationId, status: client_1.DriverStatus.AVAILABLE, licenseExpiry: { gt: new Date() } }, data: { status: client_1.DriverStatus.ON_TRIP } });
         if (vehicle.count !== 1 || driver.count !== 1)
             throw new assignmentEligibility_1.AssignmentEligibilityError([{ code: vehicle.count !== 1 ? 'VEHICLE_ON_TRIP' : 'DRIVER_ON_TRIP', field: vehicle.count !== 1 ? 'vehicleId' : 'driverId', message: 'Assignment availability changed while dispatching. Review the latest vehicle and driver status, then try again.' }]);
-        return tx.trip.update({ where: { id: trip.id }, data: { status: client_1.TripStatus.DISPATCHED, dispatchedAt: new Date(), ...estimatedProfitabilityData(estimate) }, include: { vehicle: true, driver: true } });
+        const dispatched = await tx.trip.update({ where: { id: trip.id }, data: { status: client_1.TripStatus.DISPATCHED, dispatchedAt: new Date(), ...estimatedProfitabilityData(estimate) }, include: { vehicle: true, driver: true } });
+        await notifyTripUsers(tx, { organizationId: req.user.organizationId, tripId: trip.id, assignedDriverId: trip.driverId, type: client_1.NotificationType.TRIP_DISPATCHED, title: `${trip.tripNo} dispatched`, message: `${dispatched.driver.name} was assigned ${dispatched.vehicle.registrationNo} for ${trip.source} to ${trip.destination}.` });
+        return dispatched;
     }, { isolationLevel: client_1.Prisma.TransactionIsolationLevel.Serializable });
     res.json(result);
 }));
 app.post('/api/trips/:id/complete', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => {
     const { finalOdometerKm, fuelConsumedL, driverHours } = parse(zod_1.z.object({ finalOdometerKm: zod_1.z.coerce.number().positive(), fuelConsumedL: zod_1.z.coerce.number().positive(), driverHours: zod_1.z.coerce.number().positive().optional() }), req.body);
-    const trip = await db.trip.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId }, include: { driver: true } });
-    if (!trip || trip.status !== client_1.TripStatus.DISPATCHED)
-        throw Object.assign(new Error('Only dispatched trips can be completed'), { status: 409 });
+    const trip = await db.trip.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId }, include: { driver: true, vehicle: true } });
+    if (!trip || (trip.status !== client_1.TripStatus.DISPATCHED && trip.status !== client_1.TripStatus.IN_PROGRESS))
+        throw Object.assign(new Error('Only dispatched or in-progress trips can be completed'), { status: 409 });
     if (trip.driver.payType === client_1.DriverPayType.HOURLY && trip.driver.payRate > 0 && !driverHours)
         return res.status(400).json({ message: 'Driver hours are required for hourly payout' });
     const payout = trip.driver.payRate > 0 ? (trip.driver.payType === client_1.DriverPayType.HOURLY ? trip.driver.payRate * (driverHours || 0) : trip.driver.payRate) : 0;
     const result = await db.$transaction(async (tx) => { await tx.vehicle.update({ where: { id: trip.vehicleId }, data: { status: client_1.VehicleStatus.AVAILABLE, odometerKm: finalOdometerKm } }); await tx.driver.update({ where: { id: trip.driverId }, data: { status: client_1.DriverStatus.AVAILABLE } }); const completed = await tx.trip.update({ where: { id: trip.id }, data: { status: client_1.TripStatus.COMPLETED, completedAt: new Date(), finalOdometerKm, fuelConsumedL }, include: { vehicle: true, driver: true } }); if (payout > 0)
-        await tx.expense.create({ data: { organizationId: req.user.organizationId, tripId: trip.id, vehicleId: trip.vehicleId, driverId: trip.driverId, type: client_1.ExpenseType.DRIVER_PAYMENT, description: `Driver payout for ${trip.tripNo} · ${trip.driver.payType === client_1.DriverPayType.HOURLY ? `${driverHours} hours @ ${moneyForLog(trip.driver.payRate)}/hr` : `per trip @ ${moneyForLog(trip.driver.payRate)}`}`, amount: payout, date: new Date() } }); await syncRealizedTripProfitability(tx, req.user.organizationId, trip.id); return completed; });
+        await tx.expense.create({ data: { organizationId: req.user.organizationId, tripId: trip.id, vehicleId: trip.vehicleId, driverId: trip.driverId, type: client_1.ExpenseType.DRIVER_PAYMENT, description: `Driver payout for ${trip.tripNo} · ${trip.driver.payType === client_1.DriverPayType.HOURLY ? `${driverHours} hours @ ${moneyForLog(trip.driver.payRate)}/hr` : `per trip @ ${moneyForLog(trip.driver.payRate)}`}`, amount: payout, date: new Date() } }); await syncRealizedTripProfitability(tx, req.user.organizationId, trip.id); await notifyTripUsers(tx, { organizationId: req.user.organizationId, tripId: trip.id, assignedDriverId: trip.driverId, type: client_1.NotificationType.TRIP_COMPLETED, title: `${trip.tripNo} completed`, message: `${trip.driver.name} completed the trip to ${trip.destination} in ${trip.vehicle.registrationNo}.` }); return completed; });
     res.json(result);
 }));
 app.post('/api/trips/:id/cancel', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER), asyncRoute(async (req, res) => { const trip = await db.trip.findFirst({ where: { id: idParam(req), organizationId: req.user.organizationId } }); if (!trip || (trip.status !== client_1.TripStatus.DRAFT && trip.status !== client_1.TripStatus.DISPATCHED))
     throw Object.assign(new Error('Trip cannot be cancelled'), { status: 409 }); const wasLive = trip.status === client_1.TripStatus.DISPATCHED; const result = await db.$transaction(async (tx) => { if (wasLive) {
     await tx.vehicle.update({ where: { id: trip.vehicleId }, data: { status: client_1.VehicleStatus.AVAILABLE } });
     await tx.driver.update({ where: { id: trip.driverId }, data: { status: client_1.DriverStatus.AVAILABLE } });
-} return tx.trip.update({ where: { id: trip.id }, data: { status: client_1.TripStatus.CANCELLED }, include: { vehicle: true, driver: true } }); }); res.json(result); }));
+} const cancelled = await tx.trip.update({ where: { id: trip.id }, data: { status: client_1.TripStatus.CANCELLED }, include: { vehicle: true, driver: true } }); await notifyTripUsers(tx, { organizationId: req.user.organizationId, tripId: trip.id, assignedDriverId: wasLive ? trip.driverId : null, type: client_1.NotificationType.TRIP_CANCELLED, title: `${trip.tripNo} cancelled`, message: `The ${trip.source} to ${trip.destination} trip was cancelled.` }); return cancelled; }); res.json(result); }));
 app.get('/api/profitability', allow(client_1.Role.DISPATCHER, client_1.Role.FLEET_MANAGER, client_1.Role.FINANCIAL_ANALYST), asyncRoute(async (req, res) => {
     const organizationId = req.user.organizationId;
     const current = await db.trip.findMany({ where: { organizationId, status: { not: client_1.TripStatus.CANCELLED } }, select: { id: true, vehicleId: true, plannedDistanceKm: true, revenue: true, estimatedTollsInr: true, profitabilityEstimatedAt: true, status: true } });
@@ -712,7 +787,8 @@ async function analytics(organizationId) {
 const allowFinancialAnalytics = (req, res, next) => (0, security_1.disclosurePolicyForRole)(req.user.role).financialAnalytics ? next() : res.status(403).json({ message: 'You do not have permission to view financial analytics' });
 app.get('/api/analytics', allowFinancialAnalytics, asyncRoute(async (req, res) => res.json(await analytics(req.user.organizationId))));
 app.get('/api/analytics/export.csv', allowFinancialAnalytics, asyncRoute(async (req, res) => { const a = await analytics(req.user.organizationId); const csv = ['Vehicle,Registration,Status,Completed Trips,Distance Km,Revenue,Fuel Cost,Maintenance Cost,Other Expenses,Operational Cost,Profit,Margin %,Cost Per Km,ROI %', ...a.byVehicle.map(x => `"${x.name}","${x.registrationNo}",${x.status},${x.completedTrips},${x.distanceKm.toFixed(2)},${x.revenue.toFixed(2)},${x.fuelCost.toFixed(2)},${x.maintenanceCost.toFixed(2)},${x.expenseCost.toFixed(2)},${x.operationalCost.toFixed(2)},${x.profit.toFixed(2)},${x.marginPercent?.toFixed(2) ?? ''},${x.costPerKm?.toFixed(2) ?? ''},${x.roi?.toFixed(2) ?? ''}`)].join('\n'); res.type('text/csv').attachment('fleetpilot-analytics.csv').send(csv); }));
-app.use((err, req, res, _next) => { console.error(err); if (err instanceof multer_1.default.MulterError) {
+app.use((err, req, res, _next) => { console.error(err); if (err instanceof passwordReset_1.InvalidResetTokenError)
+    return res.status(err.status).json({ code: err.code, message: err.message }); if (err instanceof multer_1.default.MulterError) {
     const isDriverOnboarding = req.path.includes('/onboarding');
     return res.status(400).json({ message: err.code === 'LIMIT_FILE_SIZE' ? `Image must be ${isDriverOnboarding ? '8' : '20'} MB or smaller` : 'The image could not be uploaded' });
 } if (err instanceof assignmentEligibility_1.AssignmentEligibilityError)

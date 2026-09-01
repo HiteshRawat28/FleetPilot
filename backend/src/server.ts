@@ -1,10 +1,11 @@
 import 'dotenv/config';
+import { randomUUID } from 'node:crypto';
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
-import { DriverDocumentType, DriverOnboardingStatus, DriverPayType, ExpenseType, Prisma, PrismaClient, Role, TripStatus, VehicleStatus, DriverStatus, MaintenanceStatus, LicenseCategory } from '@prisma/client';
+import { DriverDocumentType, DriverOnboardingStatus, DriverPayType, ExpenseType, Prisma, PrismaClient, Role, TripStatus, VehicleStatus, DriverStatus, MaintenanceStatus, LicenseCategory, NotificationType } from '@prisma/client';
 import { z } from 'zod';
 import { OAuth2Client } from 'google-auth-library';
 import { assertAssignmentEligible, AssignmentEligibilityError } from './services/assignmentEligibility';
@@ -16,8 +17,13 @@ import { createChatRouter } from './chat/chat';
 import { objectStorageConfigured, signedObjectUrl, uploadPrivateObject } from './services/objectStorage';
 import { extractDrivingLicense, extractReceipt } from './services/ocr';
 import { disclosurePolicyForRole } from './chat/security';
-import { SESSION_COOKIE, sessionCookieOptions, sessionToken } from './auth/session';
+import { SESSION_COOKIE, sessionCookieOptions, sessionToken, sessionVersionMatches } from './auth/session';
+import { passwordSchema } from './auth/passwordPolicy';
+import { InvalidResetTokenError, PasswordResetService } from './auth/passwordReset';
+import { createRateLimit, privacyHash } from './auth/rateLimit';
+import { assertEmailConfiguration } from './services/email';
 import { locationTimestampBelongsToDispatch,trackingStatus } from './services/locationTracking';
+import { receivesTripNotification } from './services/notificationAudience';
 
 const db = new PrismaClient();
 const app = express();
@@ -28,6 +34,9 @@ const tripProfitabilityConfig = loadTripProfitabilityConfig();
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173').split(',').map(origin => origin.trim());
 const cookieOptions=sessionCookieOptions(process.env.NODE_ENV==='production');
+const {maxAge:_maxAge,...clearCookieOptions}=cookieOptions;
+const passwordResetService = new PasswordResetService(db,process.env.PASSWORD_RESET_URL||`${allowedOrigins[0]}/reset-password`);
+assertEmailConfiguration();
 const tripLocationStreams=new Map<string,Set<Response>>();
 const publishTripLocation=(tripId:string,payload:unknown)=>{
   const message=`data: ${JSON.stringify(payload)}\n\n`;
@@ -49,12 +58,14 @@ const driverDocumentUpload=multer({storage:multer.memoryStorage(),limits:{fileSi
 const driverReceiptUpload=multer({storage:multer.memoryStorage(),limits:{fileSize:20*1024*1024,files:1},fileFilter:(_req,file,callback)=>callback(null,Boolean(imageMimeType(file)))});
 
 type Session = { id:string; name:string; email:string; phone?:string|null; jobTitle?:string|null; role:Role; organizationId:string; organizationName:string; driverId?:string|null; onboardingStatus?:DriverOnboardingStatus|null; mustChangePassword:boolean };
+type SessionClaims = Session & { sessionVersion?:number };
+type SessionAccount = { id:string; name:string; email:string; phone?:string|null; jobTitle?:string|null; role:Role; organizationId:string; mustChangePassword:boolean; sessionVersion:number; organization:{name:string}; driver?:{id:string;onboardingStatus:DriverOnboardingStatus}|null };
 declare global { namespace Express { interface Request { user?: Session } } }
 const asyncRoute = (fn:(req:Request,res:Response,next:NextFunction)=>Promise<unknown>) => (req:Request,res:Response,next:NextFunction) => { Promise.resolve(fn(req,res,next)).catch(next); };
 const authenticate = asyncRoute(async (req,res,next) => {
   const token = sessionToken({authorization:req.headers.authorization,cookie:req.headers.cookie});
   if (!token) return res.status(401).json({message:'Authentication required'});
-  try { const claims=jwt.verify(token,SECRET) as Session;const account=await db.user.findUnique({where:{id:claims.id},include:{organization:true,driver:true}});if(!account||!account.isActive)return res.status(401).json({message:'This session no longer has access'});await db.user.update({where:{id:account.id},data:{lastActiveAt:new Date()}});req.user=publicUser(account);next(); }
+  try { const claims=jwt.verify(token,SECRET) as SessionClaims;const account=await db.user.findUnique({where:{id:claims.id},include:{organization:true,driver:true}});if(!account||!account.isActive||!sessionVersionMatches(claims.sessionVersion,account.sessionVersion))return res.status(401).json({message:'This session no longer has access'});await db.user.update({where:{id:account.id},data:{lastActiveAt:new Date()}});req.user=publicUser(account);next(); }
   catch { res.status(401).json({message:'Session expired. Please sign in again.'}); }
 });
 const elevated = [Role.OWNER,Role.ADMIN];
@@ -66,12 +77,14 @@ const slugify = (name:string) => name.toLowerCase().trim().replace(/[^a-z0-9]+/g
 const moneyForLog = (amount:number) => `INR ${Math.round(amount).toLocaleString('en-IN')}`;
 const publicUser = (user:{id:string;name:string;email:string;phone?:string|null;jobTitle?:string|null;role:Role;organizationId:string;organization:{name:string};mustChangePassword:boolean;driver?:{id:string;onboardingStatus:DriverOnboardingStatus}|null}):Session => ({id:user.id,name:user.name,email:user.email,phone:user.phone,jobTitle:user.jobTitle,role:user.role,organizationId:user.organizationId,organizationName:user.organization.name,driverId:user.driver?.id||null,onboardingStatus:user.driver?.onboardingStatus||null,mustChangePassword:user.mustChangePassword});
 const isMobileClient = (req:Request) => req.get('x-transitops-client')==='mobile'||req.get('ngrok-skip-browser-warning')==='transitops-mobile';
-const sendSession = (req:Request,res:Response,user:Session,status=200) => {
-  const token=jwt.sign(user,SECRET,{expiresIn:'8h'});
-  res.cookie(SESSION_COOKIE,token,cookieOptions);
-  res.setHeader('Cache-Control','no-store');
-  return res.status(status).json(isMobileClient(req)?{token,user}:{user});
-};
+type NotificationDb=Pick<Prisma.TransactionClient,'user'|'notification'>;
+async function notifyTripUsers(client:NotificationDb,input:{organizationId:string;tripId:string;assignedDriverId?:string|null;type:NotificationType;title:string;message:string}){
+  const users=await client.user.findMany({where:{organizationId:input.organizationId,isActive:true},select:{id:true,role:true,driver:{select:{id:true}}}});
+  const recipients=users.filter(user=>receivesTripNotification(user.role,user.driver?.id||null,input.assignedDriverId||null));
+  if(!recipients.length)return;
+  await client.notification.createMany({data:recipients.map(user=>({organizationId:input.organizationId,userId:user.id,type:input.type,title:input.title,message:input.message,tripId:input.tripId}))});
+}
+const sendSession = (req:Request,res:Response,account:SessionAccount,status=200) => {const user=publicUser(account);const token=jwt.sign({...user,sessionVersion:account.sessionVersion},SECRET,{expiresIn:'8h'});res.cookie(SESSION_COOKIE,token,cookieOptions);res.setHeader('Cache-Control','no-store');return res.status(status).json(isMobileClient(req)?{token,user}:{user})};
 const modulesByRole:Record<Role,string[]>={
   OWNER:['Overview','Fleet registry','Drivers','Driver access','Trip dispatch','Profitability','Maintenance','Fuel & expenses','Reports','Company settings','User access'],
   ADMIN:['Overview','Fleet registry','Drivers','Driver access','Trip dispatch','Profitability','Maintenance','Fuel & expenses','Reports','Company settings','User access'],
@@ -104,6 +117,11 @@ async function driverDashboardResponse(driverId:string,organizationId:string){
   ]);
   return {profile,trips,expenses:await Promise.all(expenses.map(expenseResponse))};
 }
+const requestIp=(req:Request)=>req.ip||req.socket.remoteAddress||'unknown';
+const forgotIpLimit=createRateLimit({windowMs:60*60_000,max:20,key:requestIp});
+const forgotEmailLimit=createRateLimit({windowMs:60*60_000,max:5,key:req=>privacyHash(String(req.body?.email||''))});
+const resetIpLimit=createRateLimit({windowMs:15*60_000,max:10,key:requestIp});
+const authAudit=(event:string,requestId:string,result:string,userId?:string)=>console.info(JSON.stringify({event,requestId,result,...(userId?{userId}:{}),occurredAt:new Date().toISOString()}));
 
 app.get('/api/health', (_req,res)=>res.json({status:'ok',service:'TransitOps API'}));
 app.post('/api/auth/login', asyncRoute(async(req,res)=>{
@@ -112,7 +130,7 @@ app.post('/api/auth/login', asyncRoute(async(req,res)=>{
   if(!user || !user.passwordHash || !(await bcrypt.compare(password,user.passwordHash))) return res.status(401).json({message:'Email or password is incorrect'});
   if(!user.isActive) return res.status(403).json({message:'Your account has been suspended. Contact your company administrator.'});
   await db.user.update({where:{id:user.id},data:{lastLoginAt:new Date(),lastActiveAt:new Date()}});
-  sendSession(req,res,publicUser(user));
+  sendSession(req,res,user);
 }));
 app.post('/api/driver/auth/login',asyncRoute(async(req,res)=>{
   const {email,password}=parse(z.object({email:z.email(),password:z.string().min(8)}),req.body);
@@ -120,12 +138,12 @@ app.post('/api/driver/auth/login',asyncRoute(async(req,res)=>{
   if(!user||!user.passwordHash||!(await bcrypt.compare(password,user.passwordHash)))return res.status(401).json({message:'Email or password is incorrect'});
   if(!user.isActive)return res.status(403).json({message:'Your account has been suspended. Contact your company administrator.'});
   if(user.role!==Role.DRIVER||!user.driver)return res.status(403).json({message:'A linked Driver account is required for mobile driver access'});
-  const session=publicUser(user),token=jwt.sign(session,SECRET,{expiresIn:'24h'});
+  const session=publicUser(user),token=jwt.sign({...session,sessionVersion:user.sessionVersion},SECRET,{expiresIn:'24h'});
   await db.user.update({where:{id:user.id},data:{lastLoginAt:new Date(),lastActiveAt:new Date()}});
   res.setHeader('Cache-Control','no-store');res.json({token,user:session});
 }));
 app.post('/api/auth/register', asyncRoute(async(req,res)=>{
-  const {name,email,password,companyName}=parse(z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:z.string().min(10).regex(/[A-Z]/,'Password needs an uppercase letter').regex(/[0-9]/,'Password needs a number'),companyName:z.string().trim().min(2).max(100)}),req.body);
+  const {name,email,password,companyName}=parse(z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:passwordSchema,companyName:z.string().trim().min(2).max(100)}),req.body);
   const normalizedEmail=email.toLowerCase();
   if(await db.user.findUnique({where:{email:normalizedEmail}})) return res.status(409).json({message:'An account already exists for this email'});
   const base=slugify(companyName)||'company'; let slug=base; let suffix=1;
@@ -134,7 +152,7 @@ app.post('/api/auth/register', asyncRoute(async(req,res)=>{
     const organization=await tx.organization.create({data:{name:companyName,slug,operationsEmail:normalizedEmail}});
     return tx.user.create({data:{name,email:normalizedEmail,passwordHash:await bcrypt.hash(password,12),role:Role.OWNER,organizationId:organization.id,lastLoginAt:new Date(),lastActiveAt:new Date()},include:{organization:true,driver:true}});
   });
-  sendSession(req,res,publicUser(user),201);
+  sendSession(req,res,user,201);
 }));
 app.post('/api/auth/google', asyncRoute(async(req,res)=>{
   if(!GOOGLE_CLIENT_ID) return res.status(503).json({message:'Google sign-in is not configured yet'});
@@ -151,23 +169,58 @@ app.post('/api/auth/google', asyncRoute(async(req,res)=>{
     if(user.googleSub&&user.googleSub!==payload.sub)return res.status(409).json({message:'This email is linked to another Google identity'});
     user=await db.user.update({where:{id:user.id},data:{googleSub:payload.sub,lastLoginAt:new Date(),lastActiveAt:new Date()},include:{organization:true,driver:true}});
   }
-  sendSession(req,res,publicUser(user));
+  sendSession(req,res,user);
 }));
 app.post('/api/driver/auth/register',(_req,res)=>res.status(410).json({message:'Driver accounts are created by the company in User Access. Use the credentials provided by your fleet manager.'}));
-app.post('/api/auth/logout',(_req,res)=>{const {maxAge:_maxAge,...clearCookieOptions}=cookieOptions;res.clearCookie(SESSION_COOKIE,clearCookieOptions);res.status(204).end()});
+app.post('/api/auth/forgot-password',forgotIpLimit,forgotEmailLimit,asyncRoute(async(req,res)=>{
+  const {email}=parse(z.object({email:z.email()}),req.body);
+  const requestId=randomUUID();res.setHeader('X-Request-Id',requestId);
+  try { const userId=await passwordResetService.request(email);authAudit('password_reset_requested',requestId,userId?'issued':'ignored',userId||undefined); }
+  catch(error) { authAudit('password_reset_requested',requestId,'delivery_failed');console.error('Password-reset delivery failed:',error instanceof Error?error.message:'Unknown error'); }
+  res.setHeader('Cache-Control','no-store');
+  res.status(202).json({message:'If an account exists for that email, password-reset instructions have been sent.'});
+}));
+app.post('/api/auth/reset-password',resetIpLimit,asyncRoute(async(req,res)=>{
+  const {token,password}=parse(z.object({token:z.string().min(32).max(200),password:passwordSchema}),req.body);
+  const requestId=randomUUID();res.setHeader('X-Request-Id',requestId);
+  const userId=await passwordResetService.reset(token,password);
+  authAudit('password_reset_completed',requestId,'completed',userId);
+  res.clearCookie(SESSION_COOKIE,clearCookieOptions);
+  res.setHeader('Cache-Control','no-store');
+  res.json({message:'Your password has been reset. Please sign in.'});
+}));
+app.post('/api/auth/logout',(_req,res)=>{res.clearCookie(SESSION_COOKIE,clearCookieOptions);res.status(204).end()});
 app.get('/api/auth/me',authenticate,(req,res)=>{res.setHeader('Cache-Control','no-store');res.json({user:req.user})});
 
 app.use('/api',authenticate);
 app.post('/api/auth/change-password',asyncRoute(async(req,res)=>{
-  const {currentPassword,newPassword}=parse(z.object({currentPassword:z.string().min(8),newPassword:z.string().min(10).regex(/[A-Z]/,'Password needs an uppercase letter').regex(/[0-9]/,'Password needs a number')}),req.body);
+  const {currentPassword,newPassword}=parse(z.object({currentPassword:z.string().min(8),newPassword:passwordSchema}),req.body);
   const account=await db.user.findUnique({where:{id:req.user!.id}});
   if(!account?.passwordHash||!(await bcrypt.compare(currentPassword,account.passwordHash)))return res.status(401).json({message:'Current password is incorrect'});
-  const user=await db.user.update({where:{id:account.id},data:{passwordHash:await bcrypt.hash(newPassword,12),mustChangePassword:false},include:{organization:true,driver:true}});
-  const session=publicUser(user);res.cookie(SESSION_COOKIE,jwt.sign(session,SECRET,{expiresIn:'8h'}),cookieOptions);res.setHeader('Cache-Control','no-store');
-  res.json({user:session,...(session.role===Role.DRIVER?{token:jwt.sign(session,SECRET,{expiresIn:'24h'})}:{})});
+  const user=await db.user.update({where:{id:account.id},data:{passwordHash:await bcrypt.hash(newPassword,12),mustChangePassword:false,sessionVersion:{increment:1}},include:{organization:true,driver:true}});
+  const session=publicUser(user);res.cookie(SESSION_COOKIE,jwt.sign({...session,sessionVersion:user.sessionVersion},SECRET,{expiresIn:'8h'}),cookieOptions);res.setHeader('Cache-Control','no-store');
+  res.json({user:session,...(session.role===Role.DRIVER?{token:jwt.sign({...session,sessionVersion:user.sessionVersion},SECRET,{expiresIn:'24h'})}:{})});
 }));
 app.use('/api/chat',createChatRouter(db));
 app.get('/api/profile',asyncRoute(async(req,res)=>res.json(await profileResponse(req.user!.id))));
+app.get('/api/notifications',asyncRoute(async(req,res)=>{
+  const limit=parse(z.coerce.number().int().min(1).max(50),req.query.limit||20);
+  const where={organizationId:req.user!.organizationId,userId:req.user!.id};
+  const [items,unreadCount]=await Promise.all([
+    db.notification.findMany({where,select:{id:true,type:true,title:true,message:true,tripId:true,readAt:true,createdAt:true},orderBy:{createdAt:'desc'},take:limit}),
+    db.notification.count({where:{...where,readAt:null}})
+  ]);
+  res.setHeader('Cache-Control','no-store');res.json({items,unreadCount});
+}));
+app.post('/api/notifications/read-all',asyncRoute(async(req,res)=>{
+  await db.notification.updateMany({where:{organizationId:req.user!.organizationId,userId:req.user!.id,readAt:null},data:{readAt:new Date()}});
+  res.status(204).end();
+}));
+app.post('/api/notifications/:id/read',asyncRoute(async(req,res)=>{
+  const result=await db.notification.updateMany({where:{id:idParam(req),organizationId:req.user!.organizationId,userId:req.user!.id,readAt:null},data:{readAt:new Date()}});
+  if(!result.count&&!(await db.notification.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId,userId:req.user!.id},select:{id:true}})))throw Object.assign(new Error('Notification not found'),{status:404});
+  res.status(204).end();
+}));
 app.get('/api/search',asyncRoute(async(req,res)=>{
   const query=String(req.query.q||'').trim().slice(0,80);
   if(query.length<2)return res.json({query,results:[]});
@@ -266,8 +319,8 @@ app.get('/api/users',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{
   const users=await db.user.findMany({where:{organizationId:req.user!.organizationId},select:{id:true,name:true,email:true,role:true,isActive:true,lastLoginAt:true,lastActiveAt:true,createdAt:true,googleSub:true,driver:{select:{id:true,licenseNo:true,licenseCategory:true,licenseExpiry:true,onboardingStatus:true,reviewNote:true,status:true,payType:true,payRate:true,createdAt:true,documents:{select:{id:true,type:true,originalName:true,mimeType:true,size:true,createdAt:true},orderBy:{createdAt:'desc'}}}}},orderBy:{createdAt:'asc'}});
   res.json(users);
 }));
-const teamAccessSchema=z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/),role:z.enum(Role).refine(role=>role!==Role.OWNER&&role!==Role.DRIVER,'Driver accounts must be created from Driver Access')});
-const driverAccessSchema=z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/),contact:z.string().trim().min(7).max(30),payType:z.enum(DriverPayType).default(DriverPayType.PER_TRIP),payRate:z.coerce.number().nonnegative().default(0)});
+const teamAccessSchema=z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:passwordSchema,role:z.enum(Role).refine(role=>role!==Role.OWNER&&role!==Role.DRIVER,'Driver accounts must be created from Driver Access')});
+const driverAccessSchema=z.object({name:z.string().trim().min(2).max(80),email:z.email(),password:passwordSchema,contact:z.string().trim().min(7).max(30),payType:z.enum(DriverPayType).default(DriverPayType.PER_TRIP),payRate:z.coerce.number().nonnegative().default(0)});
 app.post('/api/users',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{
   const {name,email,password,role}=parse(teamAccessSchema,req.body);
   if(req.user!.role===Role.ADMIN&&role===Role.ADMIN)return res.status(403).json({message:'Only the Owner can add another Admin'});
@@ -285,7 +338,7 @@ app.post('/api/driver-access',allow(Role.OWNER,Role.ADMIN,Role.FLEET_MANAGER),as
   });
   res.status(201).json({id:user.id,name:user.name,email:user.email,role:user.role,isActive:user.isActive,createdAt:user.createdAt});
 }));
-app.patch('/api/users/:id',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{const target=await db.user.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!target)throw Object.assign(new Error('Team member not found'),{status:404});if(target.role===Role.OWNER)return res.status(403).json({message:'Owner access cannot be changed'});const data=parse(z.object({role:z.enum(Role).refine(r=>r!==Role.OWNER).optional(),isActive:z.boolean().optional(),password:z.string().min(10).regex(/[A-Z]/).regex(/[0-9]/).optional()}),req.body);if(req.user!.role===Role.ADMIN&&(target.role===Role.ADMIN||data.role===Role.ADMIN))return res.status(403).json({message:'Only the Owner can manage Admin access'});if(data.role&&data.role!==target.role&&(data.role===Role.DRIVER||target.role===Role.DRIVER))return res.status(409).json({message:'Driver access must be created as a new linked Driver account'});res.json(await db.user.update({where:{id:target.id},data:{role:data.role,isActive:data.isActive,...(data.password?{passwordHash:await bcrypt.hash(data.password,12),mustChangePassword:target.role===Role.DRIVER}:{})},select:{id:true,name:true,email:true,role:true,isActive:true,lastLoginAt:true,lastActiveAt:true,createdAt:true,googleSub:true}}))}));
+app.patch('/api/users/:id',allow(Role.OWNER,Role.ADMIN),asyncRoute(async(req,res)=>{const target=await db.user.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!target)throw Object.assign(new Error('Team member not found'),{status:404});if(target.role===Role.OWNER)return res.status(403).json({message:'Owner access cannot be changed'});const data=parse(z.object({role:z.enum(Role).refine(r=>r!==Role.OWNER).optional(),isActive:z.boolean().optional(),password:passwordSchema.optional()}),req.body);if(req.user!.role===Role.ADMIN&&(target.role===Role.ADMIN||data.role===Role.ADMIN))return res.status(403).json({message:'Only the Owner can manage Admin access'});if(data.role&&data.role!==target.role&&(data.role===Role.DRIVER||target.role===Role.DRIVER))return res.status(409).json({message:'Driver access must be created as a new linked Driver account'});res.json(await db.user.update({where:{id:target.id},data:{role:data.role,isActive:data.isActive,...(data.password?{passwordHash:await bcrypt.hash(data.password,12),mustChangePassword:target.role===Role.DRIVER,sessionVersion:{increment:1}}:{})},select:{id:true,name:true,email:true,role:true,isActive:true,lastLoginAt:true,lastActiveAt:true,createdAt:true,googleSub:true}}))}));
 app.get('/api/dashboard',asyncRoute(async(req,res)=>{
   const showRecentTrips=disclosurePolicyForRole(req.user!.role).recentTripDetails;
   const [vehicles,drivers,trips,recentTrips]=await Promise.all([
@@ -407,10 +460,16 @@ app.post('/api/driver/me/trips/:id/locations',driverOnly,asyncRoute(async(req,re
   const {points}=parse(z.object({points:z.array(tripLocationPointSchema).min(1).max(50)}),req.body);
   const dispatchStartedAt=trip.dispatchedAt||trip.createdAt;
   if(points.some(point=>!locationTimestampBelongsToDispatch(point.capturedAt,dispatchStartedAt)))return res.status(422).json({message:'Location timestamps must belong to this dispatch and cannot be more than five minutes in the future'});
-  const created=await db.tripLocation.createMany({data:points.map(point=>({organizationId:req.user!.organizationId,tripId:trip.id,driverId:driver.id,...point})),skipDuplicates:true});
-  const currentStatus=created.count>0&&trip.status===TripStatus.DISPATCHED
-    ?(await db.trip.update({where:{id:trip.id},data:{status:TripStatus.IN_PROGRESS,startedAt:trip.startedAt||new Date()}})).status
-    :trip.status;
+  const {created,currentStatus}=await db.$transaction(async tx=>{
+    const created=await tx.tripLocation.createMany({data:points.map(point=>({organizationId:req.user!.organizationId,tripId:trip.id,driverId:driver.id,...point})),skipDuplicates:true});
+    let currentStatus:TripStatus=trip.status;
+    if(created.count>0&&trip.status===TripStatus.DISPATCHED){
+      const changed=await tx.trip.updateMany({where:{id:trip.id,status:TripStatus.DISPATCHED},data:{status:TripStatus.IN_PROGRESS,startedAt:trip.startedAt||new Date()}});
+      if(changed.count)await notifyTripUsers(tx,{organizationId:req.user!.organizationId,tripId:trip.id,assignedDriverId:driver.id,type:NotificationType.TRIP_STARTED,title:`${trip.tripNo} started`,message:`${driver.name} started the trip from ${trip.source} to ${trip.destination}.`});
+      currentStatus=changed.count?TripStatus.IN_PROGRESS:(await tx.trip.findUnique({where:{id:trip.id},select:{status:true}}))?.status||TripStatus.IN_PROGRESS;
+    }
+    return {created,currentStatus};
+  });
   const latestLocation=await db.tripLocation.findFirst({where:{tripId:trip.id,organizationId:req.user!.organizationId},orderBy:{capturedAt:'desc'},select:{id:true,latitude:true,longitude:true,accuracyM:true,speedKph:true,headingDeg:true,altitudeM:true,batteryPct:true,isMocked:true,capturedAt:true,receivedAt:true}});
   if(latestLocation)publishTripLocation(trip.id,{type:'LOCATION_UPDATE',tripId:trip.id,tripStatus:currentStatus,trackingStatus:trackingStatus(currentStatus,latestLocation.capturedAt),location:latestLocation,serverTime:new Date()});
   res.status(201).json({accepted:created.count,duplicates:points.length-created.count,tripStatus:currentStatus,latestLocation});
@@ -535,7 +594,12 @@ app.post('/api/trips',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async
   assertAssignmentEligible({...context,cargoWeightKg:data.cargoWeightKg});
   const tripNo=`TRP${String((await db.trip.count({where:{organizationId:req.user!.organizationId}}))+1).padStart(4,'0')}`;
   const estimate=await estimateTripProfitability(req.user!.organizationId,{vehicleId:data.vehicleId,plannedDistanceKm:data.plannedDistanceKm,revenue:data.revenue,estimatedTollsInr:data.estimatedTollsInr});
-  res.status(201).json(await db.trip.create({data:{...data,...estimatedProfitabilityData(estimate),tripNo,organizationId:req.user!.organizationId},include:{vehicle:true,driver:true}}));
+  const result=await db.$transaction(async tx=>{
+    const created=await tx.trip.create({data:{...data,...estimatedProfitabilityData(estimate),tripNo,organizationId:req.user!.organizationId},include:{vehicle:true,driver:true}});
+    await notifyTripUsers(tx,{organizationId:req.user!.organizationId,tripId:created.id,type:NotificationType.TRIP_CREATED,title:`${created.tripNo} draft created`,message:`A new trip from ${created.source} to ${created.destination} is ready for dispatch review.`});
+    return created;
+  });
+  res.status(201).json(result);
 }));
 app.post('/api/trips/:id/dispatch',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
   const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}}); if(!trip) throw Object.assign(new Error('Trip not found'),{status:404});
@@ -546,16 +610,18 @@ app.post('/api/trips/:id/dispatch',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asy
     const vehicle=await tx.vehicle.updateMany({where:{id:trip.vehicleId,organizationId:req.user!.organizationId,status:VehicleStatus.AVAILABLE},data:{status:VehicleStatus.ON_TRIP}});
     const driver=await tx.driver.updateMany({where:{id:trip.driverId,organizationId:req.user!.organizationId,status:DriverStatus.AVAILABLE,licenseExpiry:{gt:new Date()}},data:{status:DriverStatus.ON_TRIP}});
     if(vehicle.count!==1||driver.count!==1)throw new AssignmentEligibilityError([{code:vehicle.count!==1?'VEHICLE_ON_TRIP':'DRIVER_ON_TRIP',field:vehicle.count!==1?'vehicleId':'driverId',message:'Assignment availability changed while dispatching. Review the latest vehicle and driver status, then try again.'}]);
-    return tx.trip.update({where:{id:trip.id},data:{status:TripStatus.DISPATCHED,dispatchedAt:new Date(),...estimatedProfitabilityData(estimate)},include:{vehicle:true,driver:true}})
+    const dispatched=await tx.trip.update({where:{id:trip.id},data:{status:TripStatus.DISPATCHED,dispatchedAt:new Date(),...estimatedProfitabilityData(estimate)},include:{vehicle:true,driver:true}});
+    await notifyTripUsers(tx,{organizationId:req.user!.organizationId,tripId:trip.id,assignedDriverId:trip.driverId,type:NotificationType.TRIP_DISPATCHED,title:`${trip.tripNo} dispatched`,message:`${dispatched.driver.name} was assigned ${dispatched.vehicle.registrationNo} for ${trip.source} to ${trip.destination}.`});
+    return dispatched;
   },{isolationLevel:Prisma.TransactionIsolationLevel.Serializable}); res.json(result);
 }));
 app.post('/api/trips/:id/complete',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{
-  const {finalOdometerKm,fuelConsumedL,driverHours}=parse(z.object({finalOdometerKm:z.coerce.number().positive(),fuelConsumedL:z.coerce.number().positive(),driverHours:z.coerce.number().positive().optional()}),req.body); const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId},include:{driver:true}}); if(!trip||trip.status!==TripStatus.DISPATCHED) throw Object.assign(new Error('Only dispatched trips can be completed'),{status:409});
+  const {finalOdometerKm,fuelConsumedL,driverHours}=parse(z.object({finalOdometerKm:z.coerce.number().positive(),fuelConsumedL:z.coerce.number().positive(),driverHours:z.coerce.number().positive().optional()}),req.body); const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId},include:{driver:true,vehicle:true}}); if(!trip||(trip.status!==TripStatus.DISPATCHED&&trip.status!==TripStatus.IN_PROGRESS)) throw Object.assign(new Error('Only dispatched or in-progress trips can be completed'),{status:409});
   if(trip.driver.payType===DriverPayType.HOURLY&&trip.driver.payRate>0&&!driverHours)return res.status(400).json({message:'Driver hours are required for hourly payout'});
   const payout=trip.driver.payRate>0?(trip.driver.payType===DriverPayType.HOURLY?trip.driver.payRate*(driverHours||0):trip.driver.payRate):0;
-  const result=await db.$transaction(async tx=>{await tx.vehicle.update({where:{id:trip.vehicleId},data:{status:VehicleStatus.AVAILABLE,odometerKm:finalOdometerKm}});await tx.driver.update({where:{id:trip.driverId},data:{status:DriverStatus.AVAILABLE}});const completed=await tx.trip.update({where:{id:trip.id},data:{status:TripStatus.COMPLETED,completedAt:new Date(),finalOdometerKm,fuelConsumedL},include:{vehicle:true,driver:true}});if(payout>0)await tx.expense.create({data:{organizationId:req.user!.organizationId,tripId:trip.id,vehicleId:trip.vehicleId,driverId:trip.driverId,type:ExpenseType.DRIVER_PAYMENT,description:`Driver payout for ${trip.tripNo} · ${trip.driver.payType===DriverPayType.HOURLY?`${driverHours} hours @ ${moneyForLog(trip.driver.payRate)}/hr`:`per trip @ ${moneyForLog(trip.driver.payRate)}`}`,amount:payout,date:new Date()}});await syncRealizedTripProfitability(tx,req.user!.organizationId,trip.id);return completed});res.json(result);
+  const result=await db.$transaction(async tx=>{await tx.vehicle.update({where:{id:trip.vehicleId},data:{status:VehicleStatus.AVAILABLE,odometerKm:finalOdometerKm}});await tx.driver.update({where:{id:trip.driverId},data:{status:DriverStatus.AVAILABLE}});const completed=await tx.trip.update({where:{id:trip.id},data:{status:TripStatus.COMPLETED,completedAt:new Date(),finalOdometerKm,fuelConsumedL},include:{vehicle:true,driver:true}});if(payout>0)await tx.expense.create({data:{organizationId:req.user!.organizationId,tripId:trip.id,vehicleId:trip.vehicleId,driverId:trip.driverId,type:ExpenseType.DRIVER_PAYMENT,description:`Driver payout for ${trip.tripNo} · ${trip.driver.payType===DriverPayType.HOURLY?`${driverHours} hours @ ${moneyForLog(trip.driver.payRate)}/hr`:`per trip @ ${moneyForLog(trip.driver.payRate)}`}`,amount:payout,date:new Date()}});await syncRealizedTripProfitability(tx,req.user!.organizationId,trip.id);await notifyTripUsers(tx,{organizationId:req.user!.organizationId,tripId:trip.id,assignedDriverId:trip.driverId,type:NotificationType.TRIP_COMPLETED,title:`${trip.tripNo} completed`,message:`${trip.driver.name} completed the trip to ${trip.destination} in ${trip.vehicle.registrationNo}.`});return completed});res.json(result);
 }));
-app.post('/api/trips/:id/cancel',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!trip||(trip.status!==TripStatus.DRAFT&&trip.status!==TripStatus.DISPATCHED))throw Object.assign(new Error('Trip cannot be cancelled'),{status:409});const wasLive=trip.status===TripStatus.DISPATCHED;const result=await db.$transaction(async tx=>{if(wasLive){await tx.vehicle.update({where:{id:trip.vehicleId},data:{status:VehicleStatus.AVAILABLE}});await tx.driver.update({where:{id:trip.driverId},data:{status:DriverStatus.AVAILABLE}})}return tx.trip.update({where:{id:trip.id},data:{status:TripStatus.CANCELLED},include:{vehicle:true,driver:true}})});res.json(result);}));
+app.post('/api/trips/:id/cancel',allow(Role.DISPATCHER,Role.FLEET_MANAGER),asyncRoute(async(req,res)=>{const trip=await db.trip.findFirst({where:{id:idParam(req),organizationId:req.user!.organizationId}});if(!trip||(trip.status!==TripStatus.DRAFT&&trip.status!==TripStatus.DISPATCHED))throw Object.assign(new Error('Trip cannot be cancelled'),{status:409});const wasLive=trip.status===TripStatus.DISPATCHED;const result=await db.$transaction(async tx=>{if(wasLive){await tx.vehicle.update({where:{id:trip.vehicleId},data:{status:VehicleStatus.AVAILABLE}});await tx.driver.update({where:{id:trip.driverId},data:{status:DriverStatus.AVAILABLE}})}const cancelled=await tx.trip.update({where:{id:trip.id},data:{status:TripStatus.CANCELLED},include:{vehicle:true,driver:true}});await notifyTripUsers(tx,{organizationId:req.user!.organizationId,tripId:trip.id,assignedDriverId:wasLive?trip.driverId:null,type:NotificationType.TRIP_CANCELLED,title:`${trip.tripNo} cancelled`,message:`The ${trip.source} to ${trip.destination} trip was cancelled.`});return cancelled});res.json(result);}));
 
 app.get('/api/profitability',allow(Role.DISPATCHER,Role.FLEET_MANAGER,Role.FINANCIAL_ANALYST),asyncRoute(async(req,res)=>{
   const organizationId=req.user!.organizationId;
@@ -587,6 +653,6 @@ const allowFinancialAnalytics=(req:Request,res:Response,next:NextFunction)=>disc
 app.get('/api/analytics',allowFinancialAnalytics,asyncRoute(async(req,res)=>res.json(await analytics(req.user!.organizationId))));
 app.get('/api/analytics/export.csv',allowFinancialAnalytics,asyncRoute(async(req,res)=>{const a=await analytics(req.user!.organizationId);const csv=['Vehicle,Registration,Status,Completed Trips,Distance Km,Revenue,Fuel Cost,Maintenance Cost,Other Expenses,Operational Cost,Profit,Margin %,Cost Per Km,ROI %',...a.byVehicle.map(x=>`"${x.name}","${x.registrationNo}",${x.status},${x.completedTrips},${x.distanceKm.toFixed(2)},${x.revenue.toFixed(2)},${x.fuelCost.toFixed(2)},${x.maintenanceCost.toFixed(2)},${x.expenseCost.toFixed(2)},${x.operationalCost.toFixed(2)},${x.profit.toFixed(2)},${x.marginPercent?.toFixed(2)??''},${x.costPerKm?.toFixed(2)??''},${x.roi?.toFixed(2)??''}`)].join('\n');res.type('text/csv').attachment('fleetpilot-analytics.csv').send(csv);}));
 
-app.use((err:any,req:Request,res:Response,_next:NextFunction)=>{console.error(err);if(err instanceof multer.MulterError){const isDriverOnboarding=req.path.includes('/onboarding');return res.status(400).json({message:err.code==='LIMIT_FILE_SIZE'?`Image must be ${isDriverOnboarding?'8':'20'} MB or smaller`:'The image could not be uploaded'});}if(err instanceof AssignmentEligibilityError)return res.status(err.status).json({code:err.code,message:err.message,reasons:err.reasons});if(err instanceof Prisma.PrismaClientKnownRequestError){if(err.code==='P2002')return res.status(409).json({message:'A record with this unique value already exists'});if(err.code==='P2022')return res.status(503).json({message:'Database setup is incomplete. Please run the latest FleetPilot migration.'});return res.status(500).json({message:'The database could not complete this request'});}if(err instanceof Prisma.PrismaClientValidationError)return res.status(400).json({message:'The request contains invalid data'});res.status(err.status||500).json({message:err.status?err.message:'Something went wrong. Please try again.'});});
+app.use((err:any,req:Request,res:Response,_next:NextFunction)=>{console.error(err);if(err instanceof InvalidResetTokenError)return res.status(err.status).json({code:err.code,message:err.message});if(err instanceof multer.MulterError){const isDriverOnboarding=req.path.includes('/onboarding');return res.status(400).json({message:err.code==='LIMIT_FILE_SIZE'?`Image must be ${isDriverOnboarding?'8':'20'} MB or smaller`:'The image could not be uploaded'});}if(err instanceof AssignmentEligibilityError)return res.status(err.status).json({code:err.code,message:err.message,reasons:err.reasons});if(err instanceof Prisma.PrismaClientKnownRequestError){if(err.code==='P2002')return res.status(409).json({message:'A record with this unique value already exists'});if(err.code==='P2022')return res.status(503).json({message:'Database setup is incomplete. Please run the latest FleetPilot migration.'});return res.status(500).json({message:'The database could not complete this request'});}if(err instanceof Prisma.PrismaClientValidationError)return res.status(400).json({message:'The request contains invalid data'});res.status(err.status||500).json({message:err.status?err.message:'Something went wrong. Please try again.'});});
 app.listen(PORT,()=>console.log(`TransitOps API running at http://localhost:${PORT}`));
 process.on('SIGTERM',async()=>{await db.$disconnect();process.exit(0)});

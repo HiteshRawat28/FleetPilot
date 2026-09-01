@@ -32,6 +32,20 @@ Authentication flow:
 - `Create company` creates a tenant-isolated organization and makes the first user its `OWNER`.
 - Owners and admins create employee credentials and assign roles from **People & access**.
 - Sign-in never accepts a role from the browser; the API resolves it from the stored organization membership.
+- `POST /api/auth/forgot-password` accepts a work email and always returns the same account-safe response. Active users receive a 30-minute, single-use link.
+- `POST /api/auth/reset-password` accepts the emailed token and a policy-compliant password. A successful reset consumes every outstanding link and revokes existing sessions.
+
+Password-reset email is printed to the backend console during local development. Production requires a verified Resend sender and these server-only values:
+
+```env
+PASSWORD_RESET_URL=https://app.example.com/reset-password
+PASSWORD_RESET_TOKEN_TTL_MINUTES=30
+EMAIL_PROVIDER=resend
+EMAIL_FROM="FleetPilot <security@example.com>"
+RESEND_API_KEY=re_replace_me
+```
+
+Apply `prisma/migrations/20260901190000_password_reset/migration.sql` to an existing database before deploying this backend. New disposable databases can continue to use `npm run db:push`.
 
 ## Trip dispatch upgrade
 
