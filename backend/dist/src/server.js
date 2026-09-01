@@ -80,7 +80,13 @@ const idParam = (req) => String(req.params.id);
 const slugify = (name) => name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 45);
 const moneyForLog = (amount) => `INR ${Math.round(amount).toLocaleString('en-IN')}`;
 const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email, phone: user.phone, jobTitle: user.jobTitle, role: user.role, organizationId: user.organizationId, organizationName: user.organization.name, driverId: user.driver?.id || null, onboardingStatus: user.driver?.onboardingStatus || null, mustChangePassword: user.mustChangePassword });
-const sendSession = (res, user, status = 200) => { res.cookie(session_1.SESSION_COOKIE, jsonwebtoken_1.default.sign(user, SECRET, { expiresIn: '8h' }), cookieOptions); res.setHeader('Cache-Control', 'no-store'); return res.status(status).json({ user }); };
+const isMobileClient = (req) => req.get('x-transitops-client') === 'mobile' || req.get('ngrok-skip-browser-warning') === 'transitops-mobile';
+const sendSession = (req, res, user, status = 200) => {
+    const token = jsonwebtoken_1.default.sign(user, SECRET, { expiresIn: '8h' });
+    res.cookie(session_1.SESSION_COOKIE, token, cookieOptions);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(status).json(isMobileClient(req) ? { token, user } : { user });
+};
 const modulesByRole = {
     OWNER: ['Overview', 'Fleet registry', 'Drivers', 'Driver access', 'Trip dispatch', 'Profitability', 'Maintenance', 'Fuel & expenses', 'Reports', 'Company settings', 'User access'],
     ADMIN: ['Overview', 'Fleet registry', 'Drivers', 'Driver access', 'Trip dispatch', 'Profitability', 'Maintenance', 'Fuel & expenses', 'Reports', 'Company settings', 'User access'],
@@ -124,7 +130,7 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
     if (!user.isActive)
         return res.status(403).json({ message: 'Your account has been suspended. Contact your company administrator.' });
     await db.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date(), lastActiveAt: new Date() } });
-    sendSession(res, publicUser(user));
+    sendSession(req, res, publicUser(user));
 }));
 app.post('/api/driver/auth/login', asyncRoute(async (req, res) => {
     const { email, password } = parse(zod_1.z.object({ email: zod_1.z.email(), password: zod_1.z.string().min(8) }), req.body);
@@ -154,7 +160,7 @@ app.post('/api/auth/register', asyncRoute(async (req, res) => {
         const organization = await tx.organization.create({ data: { name: companyName, slug, operationsEmail: normalizedEmail } });
         return tx.user.create({ data: { name, email: normalizedEmail, passwordHash: await bcryptjs_1.default.hash(password, 12), role: client_1.Role.OWNER, organizationId: organization.id, lastLoginAt: new Date(), lastActiveAt: new Date() }, include: { organization: true, driver: true } });
     });
-    sendSession(res, publicUser(user), 201);
+    sendSession(req, res, publicUser(user), 201);
 }));
 app.post('/api/auth/google', asyncRoute(async (req, res) => {
     if (!GOOGLE_CLIENT_ID)
@@ -183,7 +189,7 @@ app.post('/api/auth/google', asyncRoute(async (req, res) => {
             return res.status(409).json({ message: 'This email is linked to another Google identity' });
         user = await db.user.update({ where: { id: user.id }, data: { googleSub: payload.sub, lastLoginAt: new Date(), lastActiveAt: new Date() }, include: { organization: true, driver: true } });
     }
-    sendSession(res, publicUser(user));
+    sendSession(req, res, publicUser(user));
 }));
 app.post('/api/driver/auth/register', (_req, res) => res.status(410).json({ message: 'Driver accounts are created by the company in User Access. Use the credentials provided by your fleet manager.' }));
 app.post('/api/auth/logout', (_req, res) => { const { maxAge: _maxAge, ...clearCookieOptions } = cookieOptions; res.clearCookie(session_1.SESSION_COOKIE, clearCookieOptions); res.status(204).end(); });

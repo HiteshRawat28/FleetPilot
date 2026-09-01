@@ -9,6 +9,7 @@ import '../widgets/common.dart';
 import 'dashboard_screen.dart';
 import 'drivers_screen.dart';
 import 'more_screen.dart';
+import 'profile_screen.dart';
 import 'trips_screen.dart';
 import 'vehicles_screen.dart';
 
@@ -50,14 +51,16 @@ class _AppShellState extends State<AppShell> {
         ),
         actions: [
           Padding(
-            padding: const EdgeInsets.only(right: 16),
-            child: CircleAvatar(
-              backgroundColor: Colors.white.withValues(alpha: .72),
-              foregroundColor: AppColors.orange,
-              radius: 19,
-              child: Text(
-                user.name.isEmpty ? '?' : user.name[0].toUpperCase(),
-                style: const TextStyle(fontWeight: FontWeight.w800),
+            padding: const EdgeInsets.only(right: 8),
+            child: IconButton(
+              tooltip: 'Open personal settings',
+              onPressed: () => Navigator.of(
+                context,
+              ).push(MaterialPageRoute(builder: (_) => const ProfileScreen())),
+              icon: ProfileAvatar(
+                name: user.name,
+                avatarUrl: user.avatarUrl,
+                radius: 19,
               ),
             ),
           ),

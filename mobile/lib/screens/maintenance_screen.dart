@@ -63,7 +63,9 @@ class _MaintenanceScreenState extends State<MaintenanceScreen> {
   @override
   Widget build(BuildContext context) {
     final canManage =
-        context.watch<SessionController>().user!.role == UserRole.fleetManager;
+        context.watch<SessionController>().user!.role ==
+            UserRole.fleetManager ||
+        context.watch<SessionController>().user!.role.hasAdministrativeAccess;
     return Scaffold(
       appBar: const GlassAppBar(title: Text('Maintenance control')),
       body: _error != null

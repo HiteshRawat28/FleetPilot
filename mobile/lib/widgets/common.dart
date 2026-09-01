@@ -24,7 +24,12 @@ String prettyStatus(String value) => value
 Color statusColor(String value) => switch (value) {
   'AVAILABLE' || 'COMPLETED' || 'CLOSED' => AppColors.green,
   'ON_TRIP' || 'DISPATCHED' => AppColors.blue,
-  'IN_SHOP' || 'DRAFT' || 'ACTIVE' => AppColors.orange,
+  'IN_SHOP' ||
+  'DRAFT' ||
+  'ACTIVE' ||
+  'PENDING' ||
+  'NEEDS_REVIEW' => AppColors.orange,
+  'VERIFIED' => AppColors.green,
   _ => AppColors.red,
 };
 
@@ -63,6 +68,57 @@ class GlassCard extends StatelessWidget {
             ),
             child: Material(color: Colors.transparent, child: child),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class ProfileAvatar extends StatelessWidget {
+  const ProfileAvatar({
+    super.key,
+    required this.name,
+    this.avatarUrl,
+    this.radius = 22,
+  });
+
+  final String name;
+  final String? avatarUrl;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
+    final initial = name.trim().isEmpty ? '?' : name.trim()[0].toUpperCase();
+    return ClipOval(
+      child: SizedBox.square(
+        dimension: radius * 2,
+        child: ColoredBox(
+          color: Colors.white.withValues(alpha: .72),
+          child: avatarUrl == null
+              ? Center(
+                  child: Text(
+                    initial,
+                    style: TextStyle(
+                      color: AppColors.orange,
+                      fontWeight: FontWeight.w800,
+                      fontSize: radius * .62,
+                    ),
+                  ),
+                )
+              : Image.network(
+                  avatarUrl!,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, _, _) => Center(
+                    child: Text(
+                      initial,
+                      style: TextStyle(
+                        color: AppColors.orange,
+                        fontWeight: FontWeight.w800,
+                        fontSize: radius * .62,
+                      ),
+                    ),
+                  ),
+                ),
         ),
       ),
     );

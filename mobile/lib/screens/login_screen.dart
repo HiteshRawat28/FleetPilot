@@ -3,7 +3,6 @@ import 'package:provider/provider.dart';
 
 import '../core/app_theme.dart';
 import '../core/session_controller.dart';
-import '../models/models.dart';
 import '../widgets/common.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -14,38 +13,43 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _email = TextEditingController(text: 'manager@transitops.in');
-  final _password = TextEditingController(text: 'Password@123');
-  UserRole _role = UserRole.fleetManager;
+  final _name = TextEditingController();
+  final _companyName = TextEditingController();
+  final _email = TextEditingController();
+  final _password = TextEditingController();
   bool _obscure = true;
+  bool _createCompany = false;
 
   @override
   void dispose() {
+    _name.dispose();
+    _companyName.dispose();
     _email.dispose();
     _password.dispose();
     super.dispose();
   }
 
-  void _selectRole(UserRole? role) {
-    if (role == null) return;
-    setState(() {
-      _role = role;
-      _email.text = switch (role) {
-        UserRole.fleetManager => 'manager@transitops.in',
-        UserRole.dispatcher => 'dispatcher@transitops.in',
-        UserRole.safetyOfficer => 'safety@transitops.in',
-        UserRole.financialAnalyst => 'finance@transitops.in',
-      };
-    });
-  }
-
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
-    await context.read<SessionController>().login(
-      email: _email.text,
-      password: _password.text,
-      role: _role,
-    );
+    final session = context.read<SessionController>();
+    if (_createCompany) {
+      await session.registerCompany(
+        name: _name.text,
+        companyName: _companyName.text,
+        email: _email.text,
+        password: _password.text,
+      );
+    } else {
+      await session.login(email: _email.text, password: _password.text);
+    }
+  }
+
+  void _changeMode(bool createCompany) {
+    context.read<SessionController>().clearError();
+    setState(() {
+      _createCompany = createCompany;
+      _password.clear();
+    });
   }
 
   @override
@@ -93,9 +97,35 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                           ],
                         ),
-                        const SizedBox(height: 36),
-                        const Text(
-                          'WELCOME BACK',
+                        const SizedBox(height: 28),
+                        Container(
+                          padding: const EdgeInsets.all(5),
+                          decoration: BoxDecoration(
+                            color: AppColors.ink.withValues(alpha: .06),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: _AuthModeButton(
+                                  label: 'Sign in',
+                                  selected: !_createCompany,
+                                  onTap: () => _changeMode(false),
+                                ),
+                              ),
+                              Expanded(
+                                child: _AuthModeButton(
+                                  label: 'Create company',
+                                  selected: _createCompany,
+                                  onTap: () => _changeMode(true),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 30),
+                        Text(
+                          _createCompany ? 'OWNER ONBOARDING' : 'WELCOME BACK',
                           style: TextStyle(
                             color: AppColors.orange,
                             fontWeight: FontWeight.w800,
@@ -104,12 +134,16 @@ class _LoginScreenState extends State<LoginScreen> {
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          'Run your fleet from anywhere.',
+                          _createCompany
+                              ? 'Lead your fleet.'
+                              : 'Run your fleet from anywhere.',
                           style: Theme.of(context).textTheme.headlineLarge,
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          'Sign in with the same operations account used on the TransitOps website.',
+                          _createCompany
+                              ? 'Set up the transport company. This first account becomes its protected Owner.'
+                              : 'Sign in with the same operations account used on the TransitOps website.',
                           style: Theme.of(context).textTheme.bodyLarge
                               ?.copyWith(color: AppColors.muted),
                         ),
@@ -143,6 +177,35 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                         ],
                         const SizedBox(height: 24),
+                        if (_createCompany) ...[
+                          TextFormField(
+                            controller: _name,
+                            textCapitalization: TextCapitalization.words,
+                            autofillHints: const [AutofillHints.name],
+                            decoration: const InputDecoration(
+                              labelText: 'Your full name',
+                              prefixIcon: Icon(Icons.person_outline),
+                            ),
+                            validator: (value) =>
+                                (value?.trim().length ?? 0) < 2
+                                ? 'Enter your full name'
+                                : null,
+                          ),
+                          const SizedBox(height: 14),
+                          TextFormField(
+                            controller: _companyName,
+                            textCapitalization: TextCapitalization.words,
+                            decoration: const InputDecoration(
+                              labelText: 'Transport company',
+                              prefixIcon: Icon(Icons.business_outlined),
+                            ),
+                            validator: (value) =>
+                                (value?.trim().length ?? 0) < 2
+                                ? 'Enter the transport company name'
+                                : null,
+                          ),
+                          const SizedBox(height: 14),
+                        ],
                         TextFormField(
                           controller: _email,
                           keyboardType: TextInputType.emailAddress,
@@ -177,36 +240,53 @@ class _LoginScreenState extends State<LoginScreen> {
                               ),
                             ),
                           ),
-                          validator: (value) => (value?.length ?? 0) < 6
-                              ? 'Password must be at least 6 characters'
-                              : null,
+                          validator: (value) {
+                            final password = value ?? '';
+                            if (!_createCompany) {
+                              return password.length < 8
+                                  ? 'Password must be at least 8 characters'
+                                  : null;
+                            }
+                            if (password.length < 10) {
+                              return 'Use at least 10 characters';
+                            }
+                            if (!RegExp(r'[A-Z]').hasMatch(password)) {
+                              return 'Add one uppercase letter';
+                            }
+                            if (!RegExp(r'[0-9]').hasMatch(password)) {
+                              return 'Add one number';
+                            }
+                            return null;
+                          },
                         ),
-                        const SizedBox(height: 14),
-                        DropdownButtonFormField<UserRole>(
-                          initialValue: _role,
-                          dropdownColor: const Color(0xFFF8FAFC),
-                          borderRadius: BorderRadius.circular(12),
-                          menuMaxHeight: 260,
-                          elevation: 8,
-                          style: const TextStyle(
-                            color: AppColors.ink,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                          ),
-                          decoration: const InputDecoration(
-                            labelText: 'Access role',
-                            prefixIcon: Icon(Icons.badge_outlined),
-                          ),
-                          items: UserRole.values
-                              .map(
-                                (role) => DropdownMenuItem(
-                                  value: role,
-                                  child: Text(role.label),
+                        if (_createCompany) ...[
+                          const SizedBox(height: 14),
+                          Container(
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: AppColors.orange.withValues(alpha: .08),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: AppColors.orange.withValues(alpha: .24),
+                              ),
+                            ),
+                            child: const Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Icon(
+                                  Icons.shield_outlined,
+                                  color: AppColors.orange,
                                 ),
-                              )
-                              .toList(),
-                          onChanged: _selectRole,
-                        ),
+                                SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'Owner-level protection\nOnly the Owner can manage administrator access. Roles are never selected during sign-in.',
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 20),
                         FilledButton.icon(
                           onPressed: session.busy ? null : _submit,
@@ -220,7 +300,11 @@ class _LoginScreenState extends State<LoginScreen> {
                                 )
                               : const Icon(Icons.shield_outlined),
                           label: Text(
-                            session.busy ? 'Signing in…' : 'Sign in securely',
+                            session.busy
+                                ? 'Please wait…'
+                                : _createCompany
+                                ? 'Create company workspace'
+                                : 'Sign in securely',
                           ),
                         ),
                         const SizedBox(height: 16),
@@ -235,7 +319,9 @@ class _LoginScreenState extends State<LoginScreen> {
                             const SizedBox(width: 9),
                             Expanded(
                               child: Text(
-                                'Demo password for every role: Password@123',
+                                _createCompany
+                                    ? 'This account will be the protected Company Owner.'
+                                    : 'Use the same company-issued email and password as the TransitOps website.',
                                 style: Theme.of(context).textTheme.bodySmall,
                               ),
                             ),
@@ -252,4 +338,37 @@ class _LoginScreenState extends State<LoginScreen> {
       ),
     );
   }
+}
+
+class _AuthModeButton extends StatelessWidget {
+  const _AuthModeButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Material(
+    color: selected ? AppColors.ink : Colors.transparent,
+    borderRadius: BorderRadius.circular(10),
+    child: InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 13, horizontal: 8),
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: selected ? Colors.white : AppColors.muted,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ),
+    ),
+  );
 }

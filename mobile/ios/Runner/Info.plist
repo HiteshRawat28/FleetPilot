@@ -13,6 +13,10 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>TransitOps uses the camera to capture your profile photo and driving licence.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>TransitOps uses selected photos for your driver profile and licence verification.</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

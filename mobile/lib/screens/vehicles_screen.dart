@@ -90,7 +90,9 @@ class _VehiclesScreenState extends State<VehiclesScreen> {
   @override
   Widget build(BuildContext context) {
     final canManage =
-        context.watch<SessionController>().user!.role == UserRole.fleetManager;
+        context.watch<SessionController>().user!.role ==
+            UserRole.fleetManager ||
+        context.watch<SessionController>().user!.role.hasAdministrativeAccess;
     if (_error != null) return ErrorView(message: _error!, onRetry: _load);
     if (_vehicles == null) return const LoadingView();
     final filtered = _vehicles!.where((vehicle) {

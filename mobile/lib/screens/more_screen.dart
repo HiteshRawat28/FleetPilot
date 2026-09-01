@@ -8,6 +8,7 @@ import '../widgets/common.dart';
 import 'analytics_screen.dart';
 import 'finance_screen.dart';
 import 'maintenance_screen.dart';
+import 'profile_screen.dart';
 
 class MoreScreen extends StatelessWidget {
   const MoreScreen({super.key, required this.user});
@@ -61,60 +62,75 @@ class MoreScreen extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 24,
-                      backgroundColor: Colors.white.withValues(alpha: .62),
-                      foregroundColor: AppColors.orange,
-                      child: Text(
-                        user.name[0].toUpperCase(),
-                        style: const TextStyle(fontWeight: FontWeight.w800),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                Semantics(
+                  button: true,
+                  label: 'Open personal settings',
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: () => _open(context, const ProfileScreen()),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
                         children: [
-                          Text(
-                            user.name,
-                            style: Theme.of(context).textTheme.titleMedium,
+                          ProfileAvatar(
+                            name: user.name,
+                            avatarUrl: user.avatarUrl,
+                            radius: 24,
                           ),
-                          Text(user.email),
-                          Text(
-                            user.role.label,
-                            style: const TextStyle(
-                              color: AppColors.orange,
-                              fontWeight: FontWeight.w700,
-                              fontSize: 12,
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  user.name,
+                                  style: Theme.of(
+                                    context,
+                                  ).textTheme.titleMedium,
+                                ),
+                                Text(user.email),
+                                Text(
+                                  '${user.role.label} · Personal settings',
+                                  style: const TextStyle(
+                                    color: AppColors.orange,
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
+                          const Icon(Icons.chevron_right),
                         ],
                       ),
                     ),
-                  ],
+                  ),
                 ),
                 const Divider(height: 28),
                 _PermissionLine(
                   label: 'Manage fleet',
-                  allowed: user.role == UserRole.fleetManager,
+                  allowed:
+                      user.role.hasAdministrativeAccess ||
+                      user.role == UserRole.fleetManager,
                 ),
                 _PermissionLine(
                   label: 'Operate trips',
                   allowed:
+                      user.role.hasAdministrativeAccess ||
                       user.role == UserRole.fleetManager ||
                       user.role == UserRole.dispatcher,
                 ),
                 _PermissionLine(
                   label: 'Manage driver safety',
                   allowed:
+                      user.role.hasAdministrativeAccess ||
                       user.role == UserRole.fleetManager ||
                       user.role == UserRole.safetyOfficer,
                 ),
                 _PermissionLine(
                   label: 'Record finances',
                   allowed:
+                      user.role.hasAdministrativeAccess ||
                       user.role == UserRole.fleetManager ||
                       user.role == UserRole.financialAnalyst,
                 ),

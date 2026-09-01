@@ -36,10 +36,12 @@ dependencies:
   cupertino_icons: ^1.0.8
   provider: ^6.1.5+1
   http: ^1.6.0
+  http_parser: ^4.1.2
   shared_preferences: ^2.5.5
   intl: ^0.20.3
   path_provider: ^2.1.6
   share_plus: ^13.3.0
+  image_picker: ^1.1.2
 
 dev_dependencies:
   flutter_test:
@@ -64,6 +66,9 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - assets/images/transitops-logo.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:

@@ -86,8 +86,11 @@ class _DriversScreenState extends State<DriversScreen> {
   Widget build(BuildContext context) {
     final role = context.watch<SessionController>().user!.role;
     final canEdit =
-        role == UserRole.fleetManager || role == UserRole.safetyOfficer;
-    final canDelete = role == UserRole.fleetManager;
+        role.hasAdministrativeAccess ||
+        role == UserRole.fleetManager ||
+        role == UserRole.safetyOfficer;
+    final canDelete =
+        role.hasAdministrativeAccess || role == UserRole.fleetManager;
     if (_error != null) return ErrorView(message: _error!, onRetry: _load);
     if (_drivers == null) return const LoadingView();
     final needle = _query.toLowerCase();

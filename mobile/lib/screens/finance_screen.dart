@@ -68,7 +68,9 @@ class _FinanceScreenState extends State<FinanceScreen> {
   Widget build(BuildContext context) {
     final role = context.watch<SessionController>().user!.role;
     final canManage =
-        role == UserRole.fleetManager || role == UserRole.financialAnalyst;
+        role.hasAdministrativeAccess ||
+        role == UserRole.fleetManager ||
+        role == UserRole.financialAnalyst;
     if (_error != null) {
       return Scaffold(
         appBar: const GlassAppBar(title: Text('Fuel & expenses')),

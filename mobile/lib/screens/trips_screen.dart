@@ -103,7 +103,9 @@ class _TripsScreenState extends State<TripsScreen> {
   Widget build(BuildContext context) {
     final role = context.watch<SessionController>().user!.role;
     final canOperate =
-        role == UserRole.fleetManager || role == UserRole.dispatcher;
+        role.hasAdministrativeAccess ||
+        role == UserRole.fleetManager ||
+        role == UserRole.dispatcher;
     if (_error != null) return ErrorView(message: _error!, onRetry: _load);
     if (_trips == null) return const LoadingView();
     final shown = _filter == 'ALL'
